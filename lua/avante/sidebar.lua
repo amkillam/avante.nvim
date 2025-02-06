@@ -248,13 +248,6 @@ local function transform_result_content(selected_files, result_content, prev_fil
 
       if not the_matched_file then
         if not PPath:new(filepath):exists() then
-          if not PPath:new(filepath):parent():exists() then PPath:new(filepath):parent():mkdir({ parents = true }) end
-          local file = io.open(filepath, "w")
-          if not file then
-            Utils.warn("Could not create file: " .. filepath)
-            goto continue
-          end
-          file:close()
           the_matched_file = {
             filepath = filepath,
             content = "",
@@ -1041,6 +1034,7 @@ function Sidebar:on_mount(opts)
   local current_apply_extmark_id = nil
 
   local function show_apply_button(block)
+    if not self.result_container then return end
     if current_apply_extmark_id then
       api.nvim_buf_del_extmark(self.result_container.bufnr, CODEBLOCK_KEYBINDING_NAMESPACE, current_apply_extmark_id)
     end
