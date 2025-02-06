@@ -248,8 +248,19 @@ local function transform_result_content(selected_files, result_content, prev_fil
 
       if not the_matched_file then
         if not PPath:new(filepath):exists() then
-          Utils.warn("File not found: " .. filepath)
-          goto continue
+          if not PPath:new(filepath):parent():exists() then PPath:new(filepath):parent():mkdir({ parents = true }) end
+          local file = io.open(filepath, "w")
+          if not file then
+            Utils.warn("Could not create file: " .. filepath)
+            goto continue
+          end
+          file:close()
+          the_matched_file = {
+            filepath = filepath,
+            content = "",
+            file_type = nil,
+          }
+          selected_files[#selected_files + 1] = the_matched_file
         end
         if not PPath:new(filepath):is_file() then
           Utils.warn("Not a file: " .. filepath)
