@@ -60,7 +60,11 @@ function M.search_files(opts)
   for _, file in ipairs(files) do
     if file:find(opts.keyword) then result = result .. file .. "\n" end
   end
-  result = result:gsub("\n$", "")
+  if result == "" then
+    result = "No files found. Call `create_file` instead if the file needs to be created."
+  else
+    result = result:gsub("\n$", "")
+  end
   return result, nil
 end
 
