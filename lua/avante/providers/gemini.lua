@@ -12,7 +12,7 @@ M.role_map = {
 }
 -- M.tokenizer_id = "google/gemma-2b"
 
-M.parse_messages = function(opts)
+function M.parse_messages(opts)
   local contents = {}
   local prev_role = nil
 
@@ -64,7 +64,7 @@ M.parse_messages = function(opts)
   }
 end
 
-M.parse_response = function(ctx, data_stream, _, opts)
+function M.parse_response(ctx, data_stream, _, opts)
   local ok, json = pcall(vim.json.decode, data_stream)
   if not ok then opts.on_stop({ reason = "error", error = json }) end
   if json.candidates then
@@ -81,27 +81,30 @@ M.parse_response = function(ctx, data_stream, _, opts)
   end
 end
 
-M.parse_curl_args = function(provider, prompt_opts)
-  local base, body_opts = P.parse_config(provider)
+function M.parse_curl_args(provider, prompt_opts)
+  local provider_conf, request_body = P.parse_config(provider)
 
-  body_opts = vim.tbl_deep_extend("force", body_opts, {
+  request_body = vim.tbl_deep_extend("force", request_body, {
     generationConfig = {
-      temperature = body_opts.temperature,
-      maxOutputTokens = body_opts.max_tokens,
+      temperature = request_body.temperature,
+      maxOutputTokens = request_body.max_tokens,
     },
   })
-  body_opts.temperature = nil
-  body_opts.max_tokens = nil
+  request_body.temperature = nil
+  request_body.max_tokens = nil
+
+  local api_key = provider.parse_api_key()
+  if api_key == nil then error("Cannot get the gemini api key!") end
 
   return {
     url = Utils.url_join(
-      base.endpoint,
-      base.model .. ":streamGenerateContent?alt=sse&key=" .. provider.parse_api_key()
+      provider_conf.endpoint,
+      provider_conf.model .. ":streamGenerateContent?alt=sse&key=" .. api_key
     ),
-    proxy = base.proxy,
-    insecure = base.allow_insecure,
+    proxy = provider_conf.proxy,
+    insecure = provider_conf.allow_insecure,
     headers = { ["Content-Type"] = "application/json" },
-    body = vim.tbl_deep_extend("force", {}, M.parse_messages(prompt_opts), body_opts),
+    body = vim.tbl_deep_extend("force", {}, M.parse_messages(prompt_opts), request_body),
   }
 end
 
