@@ -70,7 +70,6 @@ function M.search_files(opts, on_log)
   for _, file in ipairs(files) do
     if file:find(opts.keyword) then table.insert(filepaths, file) end
   end
-
   return vim.json.encode(filepaths), nil
 end
 
