@@ -1,10 +1,39 @@
 local Utils = require("avante.utils")
 local Clipboard = require("avante.clipboard")
 local P = require("avante.providers")
+local Config = require("avante.config")
+
+---@class AvanteProviderFunctor
+local M = {}
+
+M.api_key_name = "ANTHROPIC_API_KEY"
+M.support_prompt_caching = true
+
+M.role_map = {
+  user = "user",
+  assistant = "assistant",
+}
+
+---@param headers table<string, string>
+---@return integer|nil
+function M:get_rate_limit_sleep_time(headers)
+  local remaining_tokens = tonumber(headers["anthropic-ratelimit-tokens-remaining"])
+  if remaining_tokens == nil then return end
+  if remaining_tokens > 10000 then return end
+  local reset_dt_str = headers["anthropic-ratelimit-tokens-reset"]
+  if remaining_tokens ~= 0 then reset_dt_str = reset_dt_str or headers["anthropic-ratelimit-requests-reset"] end
+  local reset_dt, err = Utils.parse_iso8601_date(reset_dt_str)
+  if err then
+    Utils.warn(err)
+    return
+  end
+  local now = Utils.utc_now()
+  return Utils.datetime_diff(tostring(now), tostring(reset_dt))
+end
 
 ---@param tool AvanteLLMTool
 ---@return AvanteClaudeTool
-local function transform_tool(tool)
+function M:transform_tool(tool)
   local input_schema_properties = {}
   local required = {}
   for _, field in ipairs(tool.param.fields) do
@@ -25,20 +54,13 @@ local function transform_tool(tool)
   }
 end
 
----@class AvanteProviderFunctor
-local M = {}
+function M:is_disable_stream() return false end
 
-M.api_key_name = "ANTHROPIC_API_KEY"
-M.use_xml_format = true
-
-M.role_map = {
-  user = "user",
-  assistant = "assistant",
-}
-
-function M.parse_messages(opts)
+function M:parse_messages(opts)
   ---@type AvanteClaudeMessage[]
   local messages = {}
+
+  local provider_conf, _ = P.parse_config(self)
 
   ---@type {idx: integer, length: integer}[]
   local messages_with_length = {}
@@ -49,22 +71,64 @@ function M.parse_messages(opts)
   table.sort(messages_with_length, function(a, b) return a.length > b.length end)
 
   ---@type table<integer, boolean>
-  local top_three = {}
-  for i = 1, math.min(3, #messages_with_length) do
-    top_three[messages_with_length[i].idx] = true
+  local top_two = {}
+  if self.support_prompt_caching then
+    for i = 1, math.min(2, #messages_with_length) do
+      top_two[messages_with_length[i].idx] = true
+    end
   end
 
+  local has_tool_use = false
   for idx, message in ipairs(opts.messages) do
-    table.insert(messages, {
-      role = M.role_map[message.role],
-      content = {
-        {
-          type = "text",
-          text = message.content,
-          cache_control = top_three[idx] and { type = "ephemeral" } or nil,
-        },
-      },
-    })
+    local content_items = message.content
+    local message_content = {}
+    if type(content_items) == "string" then
+      table.insert(message_content, {
+        type = "text",
+        text = message.content,
+        cache_control = top_two[idx] and { type = "ephemeral" } or nil,
+      })
+    elseif type(content_items) == "table" then
+      ---@cast content_items AvanteLLMMessageContentItem[]
+      for _, item in ipairs(content_items) do
+        if type(item) == "string" then
+          table.insert(
+            message_content,
+            { type = "text", text = item, cache_control = top_two[idx] and { type = "ephemeral" } or nil }
+          )
+        elseif type(item) == "table" and item.type == "text" then
+          table.insert(
+            message_content,
+            { type = "text", text = item.text, cache_control = top_two[idx] and { type = "ephemeral" } or nil }
+          )
+        elseif type(item) == "table" and item.type == "image" then
+          table.insert(message_content, { type = "image", source = item.source })
+        elseif not provider_conf.disable_tools and type(item) == "table" and item.type == "tool_use" then
+          has_tool_use = true
+          table.insert(message_content, { type = "tool_use", name = item.name, id = item.id, input = item.input })
+        elseif
+          not provider_conf.disable_tools
+          and type(item) == "table"
+          and item.type == "tool_result"
+          and has_tool_use
+        then
+          table.insert(
+            message_content,
+            { type = "tool_result", tool_use_id = item.tool_use_id, content = item.content, is_error = item.is_error }
+          )
+        elseif type(item) == "table" and item.type == "thinking" then
+          table.insert(message_content, { type = "thinking", thinking = item.thinking, signature = item.signature })
+        elseif type(item) == "table" and item.type == "redacted_thinking" then
+          table.insert(message_content, { type = "redacted_thinking", data = item.data })
+        end
+      end
+    end
+    if #message_content > 0 then
+      table.insert(messages, {
+        role = self.role_map[message.role],
+        content = message_content,
+      })
+    end
   end
 
   if Clipboard.support_paste_image() and opts.image_paths and #opts.image_paths > 0 then
@@ -89,12 +153,20 @@ function M.parse_messages(opts)
           role = "assistant",
           content = {},
         }
-        if tool_history.tool_use.thinking_contents then
-          for _, thinking_content in ipairs(tool_history.tool_use.thinking_contents) do
+        if tool_history.tool_use.thinking_blocks then
+          for _, thinking_block in ipairs(tool_history.tool_use.thinking_blocks) do
             msg.content[#msg.content + 1] = {
               type = "thinking",
-              thinking = thinking_content.content,
-              signature = thinking_content.signature,
+              thinking = thinking_block.thinking,
+              signature = thinking_block.signature,
+            }
+          end
+        end
+        if tool_history.tool_use.redacted_thinking_blocks then
+          for _, redacted_thinking_block in ipairs(tool_history.tool_use.redacted_thinking_blocks) do
+            msg.content[#msg.content + 1] = {
+              type = "redacted_thinking",
+              data = redacted_thinking_block.data,
             }
           end
         end
@@ -134,7 +206,7 @@ function M.parse_messages(opts)
   return messages
 end
 
-function M.parse_response(ctx, data_stream, event_state, opts)
+function M:parse_response(ctx, data_stream, event_state, opts)
   if event_state == nil then
     if data_stream:match('"message_start"') then
       event_state = "message_start"
@@ -208,21 +280,32 @@ function M.parse_response(ctx, data_stream, event_state, opts)
             :filter(function(content_block_) return content_block_.stoppped and content_block_.type == "text" end)
             :map(function(content_block_) return content_block_.text end)
             :totable()
-          local thinking_contents = vim
+          local thinking_blocks = vim
             .iter(ctx.content_blocks)
             :filter(function(content_block_) return content_block_.stoppped and content_block_.type == "thinking" end)
-            :map(
-              function(content_block_)
-                return { content = content_block_.thinking, signature = content_block_.signature }
-              end
-            )
+            :map(function(content_block_)
+              ---@type AvanteLLMThinkingBlock
+              return { thinking = content_block_.thinking, signature = content_block_.signature }
+            end)
             :totable()
+          local redacted_thinking_blocks = vim
+            .iter(ctx.content_blocks)
+            :filter(
+              function(content_block_) return content_block_.stoppped and content_block_.type == "redacted_thinking" end
+            )
+            :map(function(content_block_)
+              ---@type AvanteLLMRedactedThinkingBlock
+              return { data = content_block_.data }
+            end)
+            :totable()
+          ---@type AvanteLLMToolUse
           return {
             name = content_block.name,
             id = content_block.id,
             input_json = content_block.input_json,
             response_contents = response_contents,
-            thinking_contents = thinking_contents,
+            thinking_blocks = thinking_blocks,
+            redacted_thinking_blocks = redacted_thinking_blocks,
           }
         end)
         :totable()
@@ -238,11 +321,10 @@ function M.parse_response(ctx, data_stream, event_state, opts)
   end
 end
 
----@param provider AvanteProviderFunctor
 ---@param prompt_opts AvantePromptOptions
 ---@return table
-function M.parse_curl_args(provider, prompt_opts)
-  local provider_conf, request_body = P.parse_config(provider)
+function M:parse_curl_args(prompt_opts)
+  local provider_conf, request_body = P.parse_config(self)
   local disable_tools = provider_conf.disable_tools or false
 
   local headers = {
@@ -251,15 +333,35 @@ function M.parse_curl_args(provider, prompt_opts)
     ["anthropic-beta"] = "prompt-caching-2024-07-31",
   }
 
-  if P.env.require_api_key(provider_conf) then headers["x-api-key"] = provider.parse_api_key() end
+  if P.env.require_api_key(provider_conf) then headers["x-api-key"] = self.parse_api_key() end
 
-  local messages = M.parse_messages(prompt_opts)
+  local messages = self:parse_messages(prompt_opts)
 
   local tools = {}
   if not disable_tools and prompt_opts.tools then
     for _, tool in ipairs(prompt_opts.tools) do
-      table.insert(tools, transform_tool(tool))
+      table.insert(tools, self:transform_tool(tool))
     end
+  end
+
+  if prompt_opts.tools and Config.behaviour.enable_claude_text_editor_tool_mode then
+    if provider_conf.model:match("claude%-3%-7%-sonnet") then
+      table.insert(tools, {
+        type = "text_editor_20250124",
+        name = "str_replace_editor",
+      })
+    elseif provider_conf.model:match("claude%-3%-5%-instruct") then
+      table.insert(tools, {
+        type = "text_editor_20241022",
+        name = "str_replace_editor",
+      })
+    end
+  end
+
+  if self.support_prompt_caching and #tools > 0 then
+    local last_tool = vim.deepcopy(tools[#tools])
+    last_tool.cache_control = { type = "ephemeral" }
+    tools[#tools] = last_tool
   end
 
   return {

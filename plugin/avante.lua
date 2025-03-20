@@ -113,7 +113,7 @@ cmd("SwitchProvider", function(opts) require("avante.api").switch_provider(vim.t
   complete = function(_, line, _)
     local prefix = line:match("AvanteSwitchProvider%s*(.*)$") or ""
     ---@param key string
-    return vim.tbl_filter(function(key) return key:find(prefix, 1, true) == 1 end, Config.providers)
+    return vim.tbl_filter(function(key) return key:find(prefix, 1, true) == 1 end, Config.provider_names)
   end,
 })
 cmd(
@@ -154,3 +154,5 @@ end, {
   complete = function(_, _, _) return { "history", "memory", "cache" } end,
 })
 cmd("ShowRepoMap", function() require("avante.repo_map").show() end, { desc = "avante: show repo map" })
+cmd("Models", function() require("avante.model_selector").open() end, { desc = "avante: show models" })
+cmd("History", function() require("avante.api").select_history() end, { desc = "avante: show histories" })

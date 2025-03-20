@@ -13,9 +13,11 @@ M.role_map = {
   assistant = "assistant",
 }
 
+function M:is_disable_stream() return false end
+
 ---@param tool AvanteLLMTool
 ---@return AvanteOpenAITool
-function M.transform_tool(tool)
+function M:transform_tool(tool)
   local input_schema_properties = {}
   local required = {}
   for _, field in ipairs(tool.param.fields) do
@@ -25,21 +27,25 @@ function M.transform_tool(tool)
     }
     if not field.optional then table.insert(required, field.name) end
   end
-  local res = {
-    type = "function",
-    ["function"] = {
-      name = tool.name,
-      description = tool.description,
-    },
-  }
-  if vim.tbl_count(input_schema_properties) > 0 then
-    res["function"].parameters = {
+  ---@type AvanteOpenAIToolFunctionParameters
+  local parameters = nil
+  if not vim.tbl_isempty(input_schema_properties) then
+    parameters = {
       type = "object",
       properties = input_schema_properties,
       required = required,
       additionalProperties = false,
     }
   end
+  ---@type AvanteOpenAITool
+  local res = {
+    type = "function",
+    ["function"] = {
+      name = tool.name,
+      description = tool.description,
+      parameters = parameters,
+    },
+  }
   return res
 end
 
@@ -61,24 +67,79 @@ function M.get_user_message(opts)
   )
 end
 
-function M.is_o_series_model(model) return model and string.match(model, "^o%d+") ~= nil end
+function M.is_reasoning_model(model) return model and string.match(model, "^o%d+") ~= nil end
 
-function M.parse_messages(opts)
+function M.set_allowed_params(provider_conf, request_body)
+  if M.is_reasoning_model(provider_conf.model) then
+    request_body.temperature = 1
+  else
+    request_body.reasoning_effort = nil
+  end
+  -- If max_tokens is set in config, unset max_completion_tokens
+  if request_body.max_tokens then request_body.max_completion_tokens = nil end
+end
+
+function M:parse_messages(opts)
   local messages = {}
-  local provider = P[Config.provider]
-  local base, _ = P.parse_config(provider)
+  local provider_conf, _ = P.parse_config(self)
 
-  -- NOTE: Handle the case where the selected model is the `o1` model
-  -- "o1" models are "smart" enough to understand user prompt as a system prompt in this context
-  if M.is_o_series_model(base.model) then
-    table.insert(messages, { role = "user", content = opts.system_prompt })
+  if self.is_reasoning_model(provider_conf.model) then
+    table.insert(messages, { role = "developer", content = opts.system_prompt })
   else
     table.insert(messages, { role = "system", content = opts.system_prompt })
   end
 
-  vim
-    .iter(opts.messages)
-    :each(function(msg) table.insert(messages, { role = M.role_map[msg.role], content = msg.content }) end)
+  local has_tool_use = false
+
+  vim.iter(opts.messages):each(function(msg)
+    if type(msg.content) == "string" then
+      table.insert(messages, { role = self.role_map[msg.role], content = msg.content })
+    else
+      local content = {}
+      local tool_calls = {}
+      local tool_results = {}
+      for _, item in ipairs(msg.content) do
+        if type(item) == "string" then
+          table.insert(content, { type = "text", text = item })
+        elseif item.type == "text" then
+          table.insert(content, { type = "text", text = item.text })
+        elseif item.type == "image" then
+          table.insert(content, {
+            type = "image_url",
+            image_url = {
+              url = "data:" .. item.source.media_type .. ";" .. item.source.type .. "," .. item.source.data,
+            },
+          })
+        elseif item.type == "tool_use" then
+          has_tool_use = true
+          table.insert(tool_calls, {
+            id = item.id,
+            type = "function",
+            ["function"] = { name = item.name, arguments = vim.json.encode(item.input) },
+          })
+        elseif item.type == "tool_result" and has_tool_use then
+          table.insert(
+            tool_results,
+            { tool_call_id = item.tool_use_id, content = item.is_error and "Error: " .. item.content or item.content }
+          )
+        end
+      end
+      if #content > 0 then table.insert(messages, { role = self.role_map[msg.role], content = content }) end
+      if not provider_conf.disable_tools then
+        if #tool_calls > 0 then
+          table.insert(messages, { role = self.role_map["assistant"], tool_calls = tool_calls })
+        end
+        if #tool_results > 0 then
+          for _, tool_result in ipairs(tool_results) do
+            table.insert(
+              messages,
+              { role = "tool", tool_call_id = tool_result.tool_call_id, content = tool_result.content or "" }
+            )
+          end
+        end
+      end
+    end
+  end)
 
   if Config.behaviour.support_paste_from_clipboard and opts.image_paths and #opts.image_paths > 0 then
     local message_content = messages[#messages].content
@@ -100,20 +161,20 @@ function M.parse_messages(opts)
   vim.iter(messages):each(function(message)
     local role = message.role
     if role == prev_role then
-      if role == M.role_map["user"] then
-        table.insert(final_messages, { role = M.role_map["assistant"], content = "Ok, I understand." })
+      if role == self.role_map["assistant"] then
+        table.insert(final_messages, { role = self.role_map["user"], content = "Ok" })
       else
-        table.insert(final_messages, { role = M.role_map["user"], content = "Ok" })
+        table.insert(final_messages, { role = self.role_map["assistant"], content = "Ok, I understand." })
       end
     end
     prev_role = role
-    table.insert(final_messages, { role = M.role_map[role] or role, content = message.content })
+    table.insert(final_messages, message)
   end)
 
   if opts.tool_histories then
     for _, tool_history in ipairs(opts.tool_histories) do
       table.insert(final_messages, {
-        role = M.role_map["assistant"],
+        role = self.role_map["assistant"],
         tool_calls = {
           {
             id = tool_history.tool_use.id,
@@ -137,7 +198,7 @@ function M.parse_messages(opts)
   return final_messages
 end
 
-function M.parse_response(ctx, data_stream, _, opts)
+function M:parse_response(ctx, data_stream, _, opts)
   if data_stream:match('"%[DONE%]":') then
     opts.on_stop({ reason = "complete" })
     return
@@ -205,7 +266,7 @@ function M.parse_response(ctx, data_stream, _, opts)
   end
 end
 
-function M.parse_response_without_stream(data, _, opts)
+function M:parse_response_without_stream(data, _, opts)
   ---@type AvanteOpenAIChatResponse
   local json = vim.json.decode(data)
   if json.choices and json.choices[1] then
@@ -217,16 +278,22 @@ function M.parse_response_without_stream(data, _, opts)
   end
 end
 
-function M.parse_curl_args(provider, prompt_opts)
-  local provider_conf, request_body = P.parse_config(provider)
+function M:parse_curl_args(prompt_opts)
+  local provider_conf, request_body = P.parse_config(self)
   local disable_tools = provider_conf.disable_tools or false
 
   local headers = {
     ["Content-Type"] = "application/json",
   }
 
+  if provider_conf.extra_headers then
+    for key, value in pairs(provider_conf.extra_headers) do
+      headers[key] = value
+    end
+  end
+
   if P.env.require_api_key(provider_conf) then
-    local api_key = provider.parse_api_key()
+    local api_key = self.parse_api_key()
     if api_key == nil then
       error(Config.provider .. " API key is not set, please set it in your environment variable or config file")
     end
@@ -239,19 +306,13 @@ function M.parse_curl_args(provider, prompt_opts)
     request_body.include_reasoning = true
   end
 
-  -- NOTE: When using "o" series set the supported parameters only
-  local stream = true
-  if M.is_o_series_model(provider_conf.model) then
-    request_body.max_completion_tokens = request_body.max_tokens
-    request_body.max_tokens = nil
-    request_body.temperature = 1
-  end
+  self.set_allowed_params(provider_conf, request_body)
 
   local tools = nil
   if not disable_tools and prompt_opts.tools then
     tools = {}
     for _, tool in ipairs(prompt_opts.tools) do
-      table.insert(tools, M.transform_tool(tool))
+      table.insert(tools, self:transform_tool(tool))
     end
   end
 
@@ -265,8 +326,8 @@ function M.parse_curl_args(provider, prompt_opts)
     headers = headers,
     body = vim.tbl_deep_extend("force", {
       model = provider_conf.model,
-      messages = M.parse_messages(prompt_opts),
-      stream = stream,
+      messages = self:parse_messages(prompt_opts),
+      stream = true,
       tools = tools,
     }, request_body),
   }

@@ -1,5 +1,3 @@
-local Path = require("plenary.path")
-
 local api = vim.api
 local fn = vim.fn
 local lsp = vim.lsp
@@ -8,6 +6,8 @@ local lsp = vim.lsp
 ---@field tokens avante.utils.tokens
 ---@field root avante.utils.root
 ---@field file avante.utils.file
+---@field history avante.utils.history
+---@field environment avante.utils.environment
 local M = {}
 
 setmetatable(M, {
@@ -29,10 +29,23 @@ function M.has(plugin)
   if ok then return LazyConfig.plugins[plugin] ~= nil end
 
   local res, _ = pcall(require, plugin)
-  return res ~= nil
+  return res
 end
 
-function M.is_win() return jit.os:find("Windows") ~= nil end
+local _is_win = nil
+
+function M.is_win()
+  if _is_win == nil then _is_win = jit.os:find("Windows") ~= nil end
+  return _is_win
+end
+
+M.path_sep = (function()
+  if M.is_win() then
+    return "\\"
+  else
+    return "/"
+  end
+end)()
 
 ---@return "linux" | "darwin" | "windows"
 function M.get_os_name()
@@ -266,8 +279,10 @@ function M.get_visual_selection_and_range()
     end
   end
   if not content then return nil end
+  local filepath = fn.expand("%:p")
+  local filetype = M.get_filetype(filepath)
   -- Return the selected content and range
-  return SelectionResult:new(content, range)
+  return SelectionResult:new(filepath, filetype, content, range)
 end
 
 ---Wrapper around `api.nvim_buf_get_lines` which defaults to the current buffer
@@ -382,8 +397,17 @@ function M.debug(...)
 
   local args = { ... }
   if #args == 0 then return end
+
+  -- Get caller information
+  local info = debug.getinfo(2, "Sl")
+  local caller_source = info.source:match("@(.+)$") or "unknown"
+  local caller_module = caller_source:gsub("^.*/lua/", ""):gsub("%.lua$", ""):gsub("/", ".")
+
   local timestamp = os.date("%Y-%m-%d %H:%M:%S")
-  local formated_args = { "[" .. timestamp .. "] [AVANTE] [DEBUG]" }
+  local formated_args = {
+    "[" .. timestamp .. "] [AVANTE] [DEBUG] [" .. caller_module .. ":" .. info.currentline .. "]",
+  }
+
   for _, arg in ipairs(args) do
     if type(arg) == "string" then
       table.insert(formated_args, arg)
@@ -628,14 +652,23 @@ function M.is_same_file_ext(target_ext, filepath)
 end
 
 -- Get recent filepaths in the same project and same file ext
-function M.get_recent_filepaths(limit, filenames)
+---@param limit? integer
+---@param filenames? string[]
+---@param same_file_ext? boolean
+---@return string[]
+function M.get_recent_filepaths(limit, filenames, same_file_ext)
   local project_root = M.get_project_root()
   local current_ext = fn.expand("%:e")
   local oldfiles = vim.v.oldfiles
   local recent_files = {}
 
   for _, file in ipairs(oldfiles) do
-    if vim.startswith(file, project_root) and M.is_same_file_ext(current_ext, file) then
+    if vim.startswith(file, project_root) then
+      local has_ext = file:match("%.%w+$")
+      if not has_ext then goto continue end
+      if same_file_ext then
+        if not M.is_same_file_ext(current_ext, file) then goto continue end
+      end
       if filenames and #filenames > 0 then
         for _, filename in ipairs(filenames) do
           if file:find(filename) then table.insert(recent_files, file) end
@@ -645,6 +678,7 @@ function M.get_recent_filepaths(limit, filenames)
       end
       if #recent_files >= (limit or 10) then break end
     end
+    ::continue::
   end
 
   return recent_files
@@ -717,8 +751,7 @@ function M.scan_directory(options)
   end)()
 
   if not cmd then
-    local p = Path:new(options.directory)
-    if p:joinpath(".git"):exists() and vim.fn.executable("git") == 1 then
+    if M.path_exists(M.join_paths(options.directory, ".git")) and vim.fn.executable("git") == 1 then
       if vim.fn.has("win32") == 1 then
         cmd = {
           "powershell",
@@ -734,10 +767,7 @@ function M.scan_directory(options)
         cmd = {
           "bash",
           "-c",
-          string.format(
-            "cd %s && cat <(git ls-files --exclude-standard) <(git ls-files --exclude-standard --others)",
-            options.directory
-          ),
+          string.format("cd %s && git ls-files -co --exclude-standard", options.directory),
         }
       end
       cmd_supports_max_depth = false
@@ -752,8 +782,7 @@ function M.scan_directory(options)
   files = vim
     .iter(files)
     :map(function(file)
-      local p = Path:new(file)
-      if not p:is_absolute() then return tostring(Path:new(options.directory):joinpath(file):absolute()) end
+      if not M.is_absolute_path(file) then return M.join_paths(options.directory, file) end
       return file
     end)
     :totable()
@@ -764,7 +793,7 @@ function M.scan_directory(options)
       :filter(function(file)
         local base_dir = options.directory
         if base_dir:sub(-2) == "/." then base_dir = base_dir:sub(1, -3) end
-        local rel_path = tostring(Path:new(file):make_relative(base_dir))
+        local rel_path = M.make_relative_path(file, base_dir)
         local pieces = vim.split(rel_path, "/")
         return #pieces <= options.max_depth
       end)
@@ -775,8 +804,7 @@ function M.scan_directory(options)
     local dirs = {}
     local dirs_seen = {}
     for _, file in ipairs(files) do
-      local dir = tostring(Path:new(file):parent())
-      dir = dir .. "/"
+      local dir = M.get_parent_path(file)
       if not dirs_seen[dir] then
         table.insert(dirs, dir)
         dirs_seen[dir] = true
@@ -787,6 +815,66 @@ function M.scan_directory(options)
 
   return files
 end
+
+function M.get_parent_path(filepath)
+  if filepath == nil then error("filepath cannot be nil") end
+  if filepath == "" then return "" end
+  local is_abs = M.is_absolute_path(filepath)
+  if filepath:sub(-1) == M.path_sep then filepath = filepath:sub(1, -2) end
+  if filepath == "" then return "" end
+  local parts = vim.split(filepath, M.path_sep)
+  local parent_parts = vim.list_slice(parts, 1, #parts - 1)
+  local res = table.concat(parent_parts, M.path_sep)
+  if res == "" then
+    if is_abs then return M.path_sep end
+    return "."
+  end
+  return res
+end
+
+function M.make_relative_path(filepath, base_dir)
+  if filepath:sub(-2) == M.path_sep .. "." then filepath = filepath:sub(1, -3) end
+  if base_dir:sub(-2) == M.path_sep .. "." then base_dir = base_dir:sub(1, -3) end
+  if filepath == base_dir then return "." end
+  if filepath:sub(1, #base_dir) == base_dir then
+    filepath = filepath:sub(#base_dir + 1)
+    if filepath:sub(1, 2) == "." .. M.path_sep then
+      filepath = filepath:sub(3)
+    elseif filepath:sub(1, 1) == M.path_sep then
+      filepath = filepath:sub(2)
+    end
+  end
+  return filepath
+end
+
+function M.is_absolute_path(path)
+  if not path then return false end
+  if M.is_win() then return path:match("^%a:[/\\]") ~= nil end
+  return path:match("^/") ~= nil
+end
+
+function M.join_paths(...)
+  local paths = { ... }
+  local result = paths[1] or ""
+  for i = 2, #paths do
+    local path = paths[i]
+    if path == nil or path == "" then goto continue end
+
+    if M.is_absolute_path(path) then
+      result = path
+      goto continue
+    end
+
+    if path:sub(1, 2) == "." .. M.path_sep then path = path:sub(3) end
+
+    if result ~= "" and result:sub(-1) ~= M.path_sep then result = result .. M.path_sep end
+    result = result .. path
+    ::continue::
+  end
+  return result
+end
+
+function M.path_exists(path) return vim.loop.fs_stat(path) ~= nil end
 
 function M.is_first_letter_uppercase(str) return string.match(str, "^[A-Z]") ~= nil end
 
@@ -828,18 +916,27 @@ function M.get_mentions()
   }
 end
 
+---@param filepath string
+---@return integer|nil bufnr
 local function get_opened_buffer_by_filepath(filepath)
-  local absolute_path = Path:new(filepath):absolute()
+  local project_root = M.get_project_root()
+  local absolute_path = M.join_paths(project_root, filepath)
   for _, buf in ipairs(api.nvim_list_bufs()) do
-    if Path:new(fn.bufname(buf)):absolute() == absolute_path then return buf end
+    if M.join_paths(project_root, fn.bufname(buf)) == absolute_path then return buf end
   end
   return nil
 end
 
+---@param filepath string
+---@return integer bufnr
 function M.get_or_create_buffer_with_filepath(filepath)
   -- Check if a buffer with this filepath already exists
   local existing_buf = get_opened_buffer_by_filepath(filepath)
-  if existing_buf then return existing_buf end
+  if existing_buf then
+    -- goto this buffer
+    api.nvim_set_current_buf(existing_buf)
+    return existing_buf
+  end
 
   -- Create a new buffer without setting its name
   local buf = api.nvim_create_buf(true, false)
@@ -953,8 +1050,8 @@ function M.uniform_path(path)
   if type(path) ~= "string" then path = tostring(path) end
   if not M.file.is_in_cwd(path) then return path end
   local project_root = M.get_project_root()
-  local abs_path = Path:new(path):is_absolute() and path or Path:new(project_root):joinpath(path):absolute()
-  local relative_path = Path:new(abs_path):make_relative(project_root)
+  local abs_path = M.is_absolute_path(path) and path or M.join_paths(project_root, path)
+  local relative_path = M.make_relative_path(abs_path, project_root)
   return relative_path
 end
 
@@ -990,6 +1087,7 @@ function M.read_file_from_buf_or_disk(filepath)
   if file then
     local content = file:read("*all")
     file:close()
+    content = content:gsub("\r\n", "\n")
     return vim.split(content, "\n"), nil
   else
     return {}, open_err
@@ -1012,6 +1110,73 @@ function M.icon(string_with_icon, utf8_fallback)
   else
     return utf8_fallback or ""
   end
+end
+
+function M.deep_extend_with_metatable(behavior, ...)
+  local tables = { ... }
+  local base = tables[1]
+  if behavior == "keep" then base = tables[#tables] end
+  local mt = getmetatable(base)
+
+  local result = vim.tbl_deep_extend(behavior, ...)
+
+  if mt then setmetatable(result, mt) end
+
+  return result
+end
+
+function M.utc_now()
+  local utc_date = os.date("!*t")
+  ---@diagnostic disable-next-line: param-type-mismatch
+  local utc_time = os.time(utc_date)
+  return os.date("%Y-%m-%d %H:%M:%S", utc_time)
+end
+
+---@param dt1 string
+---@param dt2 string
+---@return integer delta_seconds
+function M.datetime_diff(dt1, dt2)
+  local pattern = "(%d+)-(%d+)-(%d+) (%d+):(%d+):(%d+)"
+  local y1, m1, d1, h1, min1, s1 = dt1:match(pattern)
+  local y2, m2, d2, h2, min2, s2 = dt2:match(pattern)
+
+  local time1 = os.time({ year = y1, month = m1, day = d1, hour = h1, min = min1, sec = s1 })
+  local time2 = os.time({ year = y2, month = m2, day = d2, hour = h2, min = min2, sec = s2 })
+
+  local delta_seconds = os.difftime(time2, time1)
+  return delta_seconds
+end
+
+---@param iso_str string
+---@return string|nil
+---@return string|nil error
+function M.parse_iso8601_date(iso_str)
+  local year, month, day, hour, min, sec = iso_str:match("(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)Z")
+  if not year then return nil, "Invalid ISO 8601 format" end
+
+  local time_table = {
+    year = tonumber(year),
+    month = tonumber(month),
+    day = tonumber(day),
+    hour = tonumber(hour),
+    min = tonumber(min),
+    sec = tonumber(sec),
+    isdst = false,
+  }
+
+  local timestamp = os.time(time_table)
+
+  return tostring(os.date("%Y-%m-%d %H:%M:%S", timestamp)), nil
+end
+
+function M.random_string(length)
+  local charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+  local result = {}
+  for _ = 1, length do
+    local rand = math.random(1, #charset)
+    table.insert(result, charset:sub(rand, rand))
+  end
+  return table.concat(result)
 end
 
 return M

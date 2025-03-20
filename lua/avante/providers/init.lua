@@ -18,6 +18,8 @@ local DressingState = { winid = nil, input_winid = nil, input_bufnr = nil }
 ---@field gemini AvanteProviderFunctor
 ---@field cohere AvanteProviderFunctor
 ---@field bedrock AvanteBedrockProviderFunctor
+---@field ollama AvanteProviderFunctor
+---@field vertex_claude AvanteProviderFunctor
 local M = {}
 
 ---@class EnvironmentHandler
@@ -30,61 +32,13 @@ E.cache = {}
 ---@param Opts AvanteSupportedProvider | AvanteProviderFunctor | AvanteBedrockProviderFunctor
 ---@return string | nil
 function E.parse_envvar(Opts)
-  local api_key_name = Opts.api_key_name
-  if api_key_name == nil then error("Requires api_key_name") end
-
-  local cache_key = type(api_key_name) == "table" and table.concat(api_key_name, "__") or api_key_name
-
-  if E.cache[cache_key] ~= nil then return E.cache[cache_key] end
-
-  local cmd = type(api_key_name) == "table" and api_key_name or api_key_name:match("^cmd:(.*)")
-
-  local value = nil
-
-  if cmd ~= nil then
-    -- NOTE: in case api_key_name is cmd, and users still set envvar
-    -- We will try to get envvar first
-    if Opts._shellenv ~= nil and Opts._shellenv ~= "" then
-      value = os.getenv(Opts._shellenv)
-      if value ~= nil then
-        E.cache[cache_key] = value
-        vim.g.avante_login = true
-        return value
-      end
-    end
-
-    if type(cmd) == "string" then cmd = vim.split(cmd, " ", { trimempty = true }) end
-
-    Utils.debug("running command:", cmd)
-    local exit_codes = { 0 }
-    local ok, job_or_err = pcall(vim.system, cmd, { text = true }, function(result)
-      Utils.debug("command result:", result)
-      local code = result.code
-      local stderr = result.stderr or ""
-      local stdout = result.stdout and vim.split(result.stdout, "\n") or {}
-      if vim.tbl_contains(exit_codes, code) then
-        value = stdout[1]
-        E.cache[cache_key] = value
-        vim.g.avante_login = true
-      else
-        Utils.error("Failed to get API key: (error code" .. code .. ")\n" .. stderr, { once = true, title = "Avante" })
-      end
-    end)
-
-    if not ok then
-      error("failed to run command: " .. cmd .. "\n" .. job_or_err)
-      return
-    end
-  else
-    value = os.getenv(api_key_name)
-  end
-
+  local value = Utils.environment.parse(Opts.api_key_name, Opts._shellenv)
   if value ~= nil then
-    E.cache[cache_key] = value
     vim.g.avante_login = true
+    return value
   end
 
-  return value
+  return nil
 end
 
 --- initialize the environment variable for current neovim session.
@@ -196,36 +150,38 @@ M.env = E
 
 M = setmetatable(M, {
   ---@param t avante.Providers
-  ---@param k Provider
+  ---@param k avante.ProviderName
   __index = function(t, k)
-    ---@type AvanteProviderFunctor | AvanteBedrockProviderFunctor
-    local Opts = M.get_config(k)
+    local provider_config = M.get_config(k)
 
+    if Config.vendors[k] ~= nil and k == "ollama" then
+      Utils.warn(
+        "ollama is now a first-class provider in avante.nvim, please stop using vendors to define ollama, for migration guide please refer to: https://github.com/yetone/avante.nvim/wiki/Custom-providers#ollama"
+      )
+    end
     ---@diagnostic disable: undefined-field,no-unknown,inject-field
-    if Config.vendors[k] ~= nil then
-      if Opts.parse_response_data ~= nil then
+    if Config.vendors[k] ~= nil and k ~= "ollama" then
+      if provider_config.parse_response_data ~= nil then
         Utils.error("parse_response_data is not supported for avante.nvim vendors")
       end
-      if Opts.__inherited_from ~= nil then
-        local BaseOpts = M.get_config(Opts.__inherited_from)
-        local ok, module = pcall(require, "avante.providers." .. Opts.__inherited_from)
-        if not ok then error("Failed to load provider: " .. Opts.__inherited_from) end
-        t[k] = vim.tbl_deep_extend("keep", Opts, BaseOpts, module)
+      if provider_config.__inherited_from ~= nil then
+        local base_provider_config = M.get_config(provider_config.__inherited_from)
+        local ok, module = pcall(require, "avante.providers." .. provider_config.__inherited_from)
+        if not ok then error("Failed to load provider: " .. provider_config.__inherited_from) end
+        t[k] = Utils.deep_extend_with_metatable("keep", provider_config, base_provider_config, module)
       else
-        t[k] = Opts
+        t[k] = provider_config
       end
     else
       local ok, module = pcall(require, "avante.providers." .. k)
       if not ok then error("Failed to load provider: " .. k) end
-      t[k] = vim.tbl_deep_extend("keep", Opts, module)
+      t[k] = Utils.deep_extend_with_metatable("keep", provider_config, module)
     end
 
     t[k].parse_api_key = function() return E.parse_envvar(t[k]) end
 
     -- default to gpt-4o as tokenizer
     if t[k].tokenizer_id == nil then t[k].tokenizer_id = "gpt-4o" end
-
-    if t[k].use_xml_format == nil then t[k].use_xml_format = true end
 
     if t[k].is_env_set == nil then t[k].is_env_set = function() return E.parse_envvar(t[k]) ~= nil end end
 
@@ -261,16 +217,23 @@ function M.setup()
       E.setup({ provider = cursor_applying_provider })
     end
   end
+
+  if Config.memory_summary_provider then
+    local memory_summary_provider = M[Config.memory_summary_provider]
+    if memory_summary_provider and memory_summary_provider ~= provider then
+      E.setup({ provider = memory_summary_provider })
+    end
+  end
 end
 
----@param provider Provider
-function M.refresh(provider)
-  require("avante.config").override({ provider = provider })
+---@param provider_name avante.ProviderName
+function M.refresh(provider_name)
+  require("avante.config").override({ provider = provider_name })
 
   ---@type AvanteProviderFunctor | AvanteBedrockProviderFunctor
   local p = M[Config.provider]
   E.setup({ provider = p, refresh = true })
-  Utils.info("Switch to provider: " .. provider, { once = true, title = "Avante" })
+  Utils.info("Switch to provider: " .. provider_name, { once = true, title = "Avante" })
 end
 
 ---@param opts AvanteProvider | AvanteSupportedProvider | AvanteProviderFunctor | AvanteBedrockProviderFunctor
@@ -292,7 +255,7 @@ function M.parse_config(opts)
 
   request_body = vim
     .iter(request_body)
-    :filter(function(_, v) return type(v) ~= "function" end)
+    :filter(function(_, v) return type(v) ~= "function" and type(v) ~= "userdata" end)
     :fold({}, function(acc, k, v)
       acc[k] = v
       return acc
@@ -302,11 +265,10 @@ function M.parse_config(opts)
 end
 
 ---@private
----@param provider Provider
----@return AvanteProviderFunctor | AvanteBedrockProviderFunctor
-function M.get_config(provider)
-  provider = provider or Config.provider
-  local cur = Config.get_provider(provider)
+---@param provider_name avante.ProviderName
+function M.get_config(provider_name)
+  provider_name = provider_name or Config.provider
+  local cur = Config.get_provider_config(provider_name)
   return type(cur) == "function" and cur() or cur
 end
 

@@ -12,7 +12,9 @@ M.role_map = {
 }
 -- M.tokenizer_id = "google/gemma-2b"
 
-function M.parse_messages(opts)
+function M:is_disable_stream() return false end
+
+function M:parse_messages(opts)
   local contents = {}
   local prev_role = nil
 
@@ -33,9 +35,36 @@ function M.parse_messages(opts)
       end
     end
     prev_role = role
-    table.insert(contents, { role = M.role_map[role] or role, parts = {
-      { text = message.content },
-    } })
+    local parts = {}
+    local content_items = message.content
+    if type(content_items) == "string" then
+      table.insert(parts, { text = content_items })
+    elseif type(content_items) == "table" then
+      ---@cast content_items AvanteLLMMessageContentItem[]
+      for _, item in ipairs(content_items) do
+        if type(item) == "string" then
+          table.insert(parts, { text = item })
+        elseif type(item) == "table" and item.type == "text" then
+          table.insert(parts, { text = item.text })
+        elseif type(item) == "table" and item.type == "image" then
+          table.insert(parts, {
+            inline_data = {
+              mime_type = "image/png",
+              data = item.source.data,
+            },
+          })
+        elseif type(item) == "table" and item.type == "tool_use" then
+          table.insert(parts, { text = item.name })
+        elseif type(item) == "table" and item.type == "tool_result" then
+          table.insert(parts, { text = item.content })
+        elseif type(item) == "table" and item.type == "thinking" then
+          table.insert(parts, { text = item.thinking })
+        elseif type(item) == "table" and item.type == "redacted_thinking" then
+          table.insert(parts, { text = item.data })
+        end
+      end
+    end
+    table.insert(contents, { role = M.role_map[role] or role, parts = parts })
   end)
 
   if Clipboard.support_paste_image() and opts.image_paths then
@@ -64,7 +93,7 @@ function M.parse_messages(opts)
   }
 end
 
-function M.parse_response(ctx, data_stream, _, opts)
+function M:parse_response(ctx, data_stream, _, opts)
   local ok, json = pcall(vim.json.decode, data_stream)
   if not ok then opts.on_stop({ reason = "error", error = json }) end
   if json.candidates then
@@ -81,8 +110,8 @@ function M.parse_response(ctx, data_stream, _, opts)
   end
 end
 
-function M.parse_curl_args(provider, prompt_opts)
-  local provider_conf, request_body = P.parse_config(provider)
+function M:parse_curl_args(prompt_opts)
+  local provider_conf, request_body = P.parse_config(self)
 
   request_body = vim.tbl_deep_extend("force", request_body, {
     generationConfig = {
@@ -93,7 +122,7 @@ function M.parse_curl_args(provider, prompt_opts)
   request_body.temperature = nil
   request_body.max_tokens = nil
 
-  local api_key = provider.parse_api_key()
+  local api_key = self.parse_api_key()
   if api_key == nil then error("Cannot get the gemini api key!") end
 
   return {
@@ -104,7 +133,7 @@ function M.parse_curl_args(provider, prompt_opts)
     proxy = provider_conf.proxy,
     insecure = provider_conf.allow_insecure,
     headers = { ["Content-Type"] = "application/json" },
-    body = vim.tbl_deep_extend("force", {}, M.parse_messages(prompt_opts), request_body),
+    body = vim.tbl_deep_extend("force", {}, self:parse_messages(prompt_opts), request_body),
   }
 end
 

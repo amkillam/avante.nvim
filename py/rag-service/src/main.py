@@ -8,6 +8,8 @@ import json
 import multiprocessing
 import os
 import re
+import shutil
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -44,7 +46,10 @@ from llama_index.core import (
 )
 from llama_index.core.node_parser import CodeSplitter
 from llama_index.core.schema import Document
+from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.llms.ollama import Ollama
+from llama_index.llms.openai import OpenAI
 from llama_index.vector_stores.chroma import ChromaVectorStore
 from markdownify import markdownify as md
 from models.indexing_history import IndexingHistory  # noqa: TC002
@@ -128,7 +133,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: ARG001
                     # Start indexing
                     await index_remote_resource_async(resource)
 
-                logger.info("Successfully synced resource: %s", resource.uri)
+                logger.debug("Successfully synced resource: %s", resource.uri)
 
             except (OSError, ValueError, RuntimeError) as e:
                 error_msg = f"Failed to sync resource {resource.uri}: {e}"
@@ -311,14 +316,57 @@ init_db()
 
 # Initialize ChromaDB and LlamaIndex services
 chroma_client = chromadb.PersistentClient(path=str(CHROMA_PERSIST_DIR))
-chroma_collection = chroma_client.get_or_create_collection("documents")
+
+# Check if provider or model has changed
+current_provider = os.getenv("RAG_PROVIDER", "openai").lower()
+current_embed_model = os.getenv("RAG_EMBED_MODEL", "")
+current_llm_model = os.getenv("RAG_LLM_MODEL", "")
+
+# Try to read previous config
+config_file = BASE_DATA_DIR / "rag_config.json"
+if config_file.exists():
+    with Path.open(config_file, "r") as f:
+        prev_config = json.load(f)
+        if prev_config.get("provider") != current_provider or prev_config.get("embed_model") != current_embed_model:
+            # Clear existing data if config changed
+            logger.info("Detected config change, clearing existing data...")
+            chroma_client.reset()
+
+# Save current config
+with Path.open(config_file, "w") as f:
+    json.dump({"provider": current_provider, "embed_model": current_embed_model}, f)
+
+chroma_collection = chroma_client.get_or_create_collection("documents")  # pyright: ignore
 vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
 storage_context = StorageContext.from_defaults(vector_store=vector_store)
-embed_model = OpenAIEmbedding()
-model = os.getenv("OPENAI_EMBED_MODEL", "")
-if model:
-    embed_model = OpenAIEmbedding(model=model)
+
+# Initialize embedding model based on provider
+llm_provider = current_provider
+base_url = os.getenv(llm_provider.upper() + "_API_BASE", "")
+rag_embed_model = current_embed_model
+rag_llm_model = current_llm_model
+
+if llm_provider == "ollama":
+    if base_url == "":
+        base_url = "http://localhost:11434"
+    if rag_embed_model == "":
+        rag_embed_model = "nomic-embed-text"
+    if rag_llm_model == "":
+        rag_llm_model = "llama3"
+    embed_model = OllamaEmbedding(model_name=rag_embed_model, base_url=base_url)
+    llm_model = Ollama(model=rag_llm_model, base_url=base_url, request_timeout=60.0)
+else:
+    if base_url == "":
+        base_url = "https://api.openai.com/v1"
+    if rag_embed_model == "":
+        rag_embed_model = "text-embedding-3-small"
+    if rag_llm_model == "":
+        rag_llm_model = "gpt-4o-mini"
+    embed_model = OpenAIEmbedding(model=rag_embed_model, api_base=base_url)
+    llm_model = OpenAI(model=rag_llm_model, api_base=base_url)
+
 Settings.embed_model = embed_model
+Settings.llm = llm_model
 
 
 try:
@@ -328,11 +376,16 @@ except (OSError, ValueError) as e:
     index = VectorStoreIndex([], storage_context=storage_context)
 
 
-class ResourceRequest(BaseModel):
+class ResourceURIRequest(BaseModel):
+    """Request model for resource operations."""
+
+    uri: str = Field(..., description="URI of the resource to watch and index")
+
+
+class ResourceRequest(ResourceURIRequest):
     """Request model for resource operations."""
 
     name: str = Field(..., description="Name of the resource to watch and index")
-    uri: str = Field(..., description="URI of the resource to watch and index")
 
 
 class SourceDocument(BaseModel):
@@ -424,10 +477,10 @@ def process_document_batch(documents: list[Document]) -> bool:  # noqa: PLR0915,
             # Check if document with same hash has already been successfully processed
             status_records = indexing_history_service.get_indexing_status(doc=doc)
             if status_records and status_records[0].status == "completed":
-                logger.info("Document with same hash already processed, skipping: %s", doc.doc_id)
+                logger.debug("Document with same hash already processed, skipping: %s", doc.doc_id)
                 continue
 
-            logger.info("Processing document: %s", doc.doc_id)
+            logger.debug("Processing document: %s", doc.doc_id)
             try:
                 content = doc.get_content()
 
@@ -506,42 +559,219 @@ def process_document_batch(documents: list[Document]) -> bool:  # noqa: PLR0915,
         return False
 
 
+def get_gitignore_files(directory: Path) -> list[str]:
+    """Get patterns from .gitignore file."""
+    patterns = [".git/"]
+
+    # Check for .gitignore
+    gitignore_path = directory / ".gitignore"
+    if gitignore_path.exists():
+        with gitignore_path.open("r", encoding="utf-8") as f:
+            patterns.extend(f.readlines())
+
+    return patterns
+
+
+def get_gitcrypt_files(directory: Path) -> list[str]:
+    """Get patterns of git-crypt encrypted files using git command."""
+    git_crypt_patterns = []
+    git_executable = shutil.which("git")
+
+    if not git_executable:
+        logger.warning("git command not found, git-crypt files will not be excluded")
+        return git_crypt_patterns
+
+    try:
+        # Find git root directory
+        git_root_cmd = subprocess.run(
+            [git_executable, "-C", str(directory), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if git_root_cmd.returncode != 0:
+            logger.warning("Not a git repository or git command failed: %s", git_root_cmd.stderr.strip())
+            return git_crypt_patterns
+
+        git_root = Path(git_root_cmd.stdout.strip())
+
+        # Get relative path from git root to our directory
+        rel_path = directory.relative_to(git_root) if directory != git_root else Path()
+
+        # Execute git commands separately and pipe the results
+        git_ls_files = subprocess.run(
+            [git_executable, "-C", str(git_root), "ls-files", "-z"],
+            capture_output=True,
+            text=False,
+            check=False,
+        )
+
+        if git_ls_files.returncode != 0:
+            return git_crypt_patterns
+
+        # Use Python to process the output instead of xargs, grep, and cut
+        git_check_attr = subprocess.run(
+            [git_executable, "-C", str(git_root), "check-attr", "filter", "--stdin", "-z"],
+            input=git_ls_files.stdout,
+            capture_output=True,
+            text=False,
+            check=False,
+        )
+
+        if git_check_attr.returncode != 0:
+            return git_crypt_patterns
+
+        # Process the output in Python to find git-crypt files
+        output = git_check_attr.stdout.decode("utf-8")
+        lines = output.split("\0")
+
+        for i in range(0, len(lines) - 2, 3):
+            if i + 2 < len(lines) and lines[i + 2] == "git-crypt":
+                file_path = lines[i]
+                # Only include files that are in our directory or subdirectories
+                file_path_obj = Path(file_path)
+                if str(rel_path) == "." or file_path_obj.is_relative_to(rel_path):
+                    git_crypt_patterns.append(file_path)
+
+        # Log if git-crypt patterns were found
+        if git_crypt_patterns:
+            logger.debug("Excluding git-crypt encrypted files: %s", git_crypt_patterns)
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.warning("Error getting git-crypt files: %s", str(e))
+
+    return git_crypt_patterns
+
+
 def get_pathspec(directory: Path) -> pathspec.PathSpec | None:
     """Get pathspec for the directory."""
-    gitignore_path = directory / ".gitignore"
-    if not gitignore_path.exists():
+    # Collect patterns from both sources
+    patterns = get_gitignore_files(directory)
+    patterns.extend(get_gitcrypt_files(directory))
+
+    # Return None if no patterns were found
+    if len(patterns) <= 1:  # Only .git/ is in the list
         return None
 
-    # Read gitignore patterns
-    with gitignore_path.open("r", encoding="utf-8") as f:
-        return pathspec.GitIgnoreSpec.from_lines([*f.readlines(), ".git/"])
+    return pathspec.GitIgnoreSpec.from_lines(patterns)
 
 
 def scan_directory(directory: Path) -> list[str]:
     """Scan directory and return a list of matched files."""
     spec = get_pathspec(directory)
 
+    binary_extensions = [
+        # Images
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".ico",
+        ".webp",
+        ".tiff",
+        ".exr",
+        ".hdr",
+        ".svg",
+        ".psd",
+        ".ai",
+        ".eps",
+        # Audio/Video
+        ".mp3",
+        ".wav",
+        ".mp4",
+        ".avi",
+        ".mov",
+        ".webm",
+        ".flac",
+        ".ogg",
+        ".m4a",
+        ".aac",
+        ".wma",
+        ".flv",
+        ".mkv",
+        ".wmv",
+        # Documents
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".odt",
+        # Archives
+        ".zip",
+        ".tar",
+        ".gz",
+        ".7z",
+        ".rar",
+        ".iso",
+        ".dmg",
+        ".pkg",
+        ".deb",
+        ".rpm",
+        ".msi",
+        ".apk",
+        ".xz",
+        ".bz2",
+        # Compiled
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".class",
+        ".pyc",
+        ".o",
+        ".obj",
+        ".lib",
+        ".a",
+        ".out",
+        ".app",
+        ".apk",
+        ".jar",
+        # Fonts
+        ".ttf",
+        ".otf",
+        ".woff",
+        ".woff2",
+        ".eot",
+        # Other binary
+        ".bin",
+        ".dat",
+        ".db",
+        ".sqlite",
+        ".db",
+        ".DS_Store",
+    ]
+
     matched_files = []
 
     for root, _, files in os.walk(directory):
         file_paths = [str(Path(root) / file) for file in files]
-        if not spec:
-            matched_files.extend(file_paths)
-            continue
-        matched_files.extend([file for file in file_paths if not spec.match_file(os.path.relpath(file, directory))])
+        for file in file_paths:
+            file_ext = Path(file).suffix.lower()
+            if file_ext in binary_extensions:
+                logger.debug("Skipping binary file: %s", file)
+                continue
+
+            if spec and spec.match_file(os.path.relpath(file, directory)):
+                logger.debug("Ignoring file: %s", file)
+            else:
+                matched_files.append(file)
 
     return matched_files
 
 
 def update_index_for_file(directory: Path, abs_file_path: Path) -> None:
     """Update the index for a single file."""
-    logger.info("Starting to index file: %s", abs_file_path)
+    logger.debug("Starting to index file: %s", abs_file_path)
 
     rel_file_path = abs_file_path.relative_to(directory)
 
     spec = get_pathspec(directory)
     if spec and spec.match_file(rel_file_path):
-        logger.info("File is ignored, skipping: %s", abs_file_path)
+        logger.debug("File is ignored, skipping: %s", abs_file_path)
         return
 
     resource = resource_service.get_resource(path_to_uri(directory))
@@ -557,13 +787,13 @@ def update_index_for_file(directory: Path, abs_file_path: Path) -> None:
         required_exts=required_exts,
     ).load_data()
 
-    logger.info("Updating index: %s", abs_file_path)
+    logger.debug("Updating index: %s", abs_file_path)
     processed_documents = split_documents(documents)
     success = process_document_batch(processed_documents)
 
     if success:
         resource_service.update_resource_indexing_status(resource.uri, "indexed", "")
-        logger.info("File indexing completed: %s", abs_file_path)
+        logger.debug("File indexing completed: %s", abs_file_path)
     else:
         resource_service.update_resource_indexing_status(resource.uri, "failed", "unknown error")
         logger.error("File indexing failed: %s", abs_file_path)
@@ -628,7 +858,7 @@ async def index_remote_resource_async(resource: Resource) -> None:
     resource_service.update_resource_indexing_status(resource.uri, "indexing", "")
     url = resource.uri
     try:
-        logger.info("Loading resource content: %s", url)
+        logger.debug("Loading resource content: %s", url)
 
         # Fetch markdown content
         markdown = fetch_markdown(url)
@@ -638,7 +868,7 @@ async def index_remote_resource_async(resource: Resource) -> None:
         # Extract links from markdown
         links = markdown_to_links(url, markdown)
 
-        logger.info("Found %d sub links", len(links))
+        logger.debug("Found %d sub links", len(links))
         logger.debug("Link list: %s", links)
 
         # Use thread pool for parallel batch processing
@@ -655,13 +885,13 @@ async def index_remote_resource_async(resource: Resource) -> None:
         # Create documents from links
         documents = [Document(text=markdown, doc_id=link) for link, markdown in link_md_pairs]
 
-        logger.info("Found %d documents", len(documents))
+        logger.debug("Found %d documents", len(documents))
         logger.debug("Document list: %s", [doc.doc_id for doc in documents])
 
         # Process documents in batches
         total_documents = len(documents)
         batches = [documents[i : i + BATCH_SIZE] for i in range(0, total_documents, BATCH_SIZE)]
-        logger.info("Splitting documents into %d batches for processing", len(batches))
+        logger.debug("Splitting documents into %d batches for processing", len(batches))
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             results = await loop.run_in_executor(
@@ -671,7 +901,7 @@ async def index_remote_resource_async(resource: Resource) -> None:
 
         # Check processing results
         if all(results):
-            logger.info("Resource %s indexing completed", url)
+            logger.debug("Resource %s indexing completed", url)
             resource_service.update_resource_indexing_status(resource.uri, "indexed", "")
         else:
             failed_batches = len([r for r in results if not r])
@@ -840,7 +1070,7 @@ async def add_resource(request: ResourceRequest, background_tasks: BackgroundTas
         404: {"description": "Resource not found in watch list"},
     },
 )
-async def remove_resource(request: ResourceRequest):  # noqa: D103, ANN201
+async def remove_resource(request: ResourceURIRequest):  # noqa: D103, ANN201
     resource = resource_service.get_resource(request.uri)
     if not resource or resource.status != "active":
         raise HTTPException(status_code=404, detail="Resource not being watched")

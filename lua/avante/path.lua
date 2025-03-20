@@ -1,76 +1,155 @@
 local fn = vim.fn
 local Utils = require("avante.utils")
-local LRUCache = require("avante.utils.lru_cache")
 local Path = require("plenary.path")
 local Scan = require("plenary.scandir")
 local Config = require("avante.config")
-
----@class avante.ChatHistoryEntry
----@field timestamp string
----@field provider string
----@field model string
----@field request string
----@field response string
----@field original_response string
----@field selected_file {filepath: string}?
----@field selected_code {filetype: string, content: string}?
----@field reset_memory boolean?
----@field selected_filepaths string[] | nil
 
 ---@class avante.Path
 ---@field history_path Path
 ---@field cache_path Path
 local P = {}
 
-local history_file_cache = LRUCache:new(12)
-
--- History path
-local History = {}
-
--- Get a chat history file name given a buffer
----@param bufnr integer
----@return string
-function History.filename(bufnr)
+---@param bufnr integer | nil
+---@return string dirname
+local function generate_project_dirname_in_storage(bufnr)
   local project_root = Utils.root.get({
     buf = bufnr,
   })
   -- Replace path separators with double underscores
   local path_with_separators = fn.substitute(project_root, "/", "__", "g")
   -- Replace other non-alphanumeric characters with single underscores
-  return fn.substitute(path_with_separators, "[^A-Za-z0-9._]", "_", "g") .. ".json"
+  local dirname = fn.substitute(path_with_separators, "[^A-Za-z0-9._]", "_", "g")
+  return tostring(Path:new("projects"):joinpath(dirname))
 end
 
--- Returns the Path to the chat history file for the given buffer.
+local function filepath_to_filename(filepath) return tostring(filepath):sub(tostring(filepath:parent()):len() + 2) end
+
+-- History path
+local History = {}
+
+function History.get_history_dir(bufnr)
+  local dirname = generate_project_dirname_in_storage(bufnr)
+  local history_dir = Path:new(Config.history.storage_path):joinpath(dirname):joinpath("history")
+  if not history_dir:exists() then history_dir:mkdir({ parents = true }) end
+  return history_dir
+end
+
+function History.list(bufnr)
+  local history_dir = History.get_history_dir(bufnr)
+  local files = vim.fn.glob(tostring(history_dir:joinpath("*.json")), true, true)
+  local latest_filename = History.get_latest_filename(bufnr, false)
+  local res = {}
+  for _, filename in ipairs(files) do
+    if not filename:match("metadata.json") then
+      local filepath = Path:new(filename)
+      local content = filepath:read()
+      local history = vim.json.decode(content)
+      history.filename = filepath_to_filename(filepath)
+      table.insert(res, history)
+    end
+  end
+  --- sort by timestamp
+  --- sort by latest_filename
+  table.sort(res, function(a, b)
+    if a.filename == latest_filename then return true end
+    if b.filename == latest_filename then return false end
+    local timestamp_a = #a.entries > 0 and a.entries[#a.entries].timestamp or a.timestamp
+    local timestamp_b = #b.entries > 0 and b.entries[#b.entries].timestamp or b.timestamp
+    return timestamp_a > timestamp_b
+  end)
+  return res
+end
+
+-- Get a chat history file name given a buffer
 ---@param bufnr integer
+---@param new boolean
 ---@return Path
-function History.get(bufnr) return Path:new(Config.history.storage_path):joinpath(History.filename(bufnr)) end
+function History.get_latest_filepath(bufnr, new)
+  local history_dir = History.get_history_dir(bufnr)
+  local filename = History.get_latest_filename(bufnr, new)
+  return history_dir:joinpath(filename)
+end
+
+function History.get_filepath(bufnr, filename)
+  local history_dir = History.get_history_dir(bufnr)
+  return history_dir:joinpath(filename)
+end
+
+function History.get_metadata_filepath(bufnr)
+  local history_dir = History.get_history_dir(bufnr)
+  return history_dir:joinpath("metadata.json")
+end
+
+function History.get_latest_filename(bufnr, new)
+  local history_dir = History.get_history_dir(bufnr)
+  local filename
+  local metadata_filepath = History.get_metadata_filepath(bufnr)
+  if metadata_filepath:exists() and not new then
+    local metadata_content = metadata_filepath:read()
+    local metadata = vim.json.decode(metadata_content)
+    filename = metadata.latest_filename
+  end
+  if not filename or filename == "" then
+    local pattern = tostring(history_dir:joinpath("*.json"))
+    local files = vim.fn.glob(pattern, true, true)
+    filename = #files .. ".json"
+    if #files > 0 and not new then filename = (#files - 1) .. ".json" end
+  end
+  return filename
+end
+
+function History.save_latest_filename(bufnr, filename)
+  local metadata_filepath = History.get_metadata_filepath(bufnr)
+  local metadata
+  if not metadata_filepath:exists() then
+    metadata = {}
+  else
+    local metadata_content = metadata_filepath:read()
+    metadata = vim.json.decode(metadata_content)
+  end
+  metadata.latest_filename = filename
+  metadata_filepath:write(vim.json.encode(metadata), "w")
+end
+
+---@param bufnr integer
+function History.new(bufnr)
+  local filepath = History.get_latest_filepath(bufnr, true)
+  ---@type avante.ChatHistory
+  local history = {
+    title = "untitled",
+    timestamp = tostring(os.date("%Y-%m-%d %H:%M:%S")),
+    entries = {},
+    filename = filepath_to_filename(filepath),
+  }
+  return history
+end
 
 -- Loads the chat history for the given buffer.
 ---@param bufnr integer
----@return avante.ChatHistoryEntry[]
-function History.load(bufnr)
-  local history_file = History.get(bufnr)
-  local cached_key = tostring(history_file:absolute())
-  local cached_value = history_file_cache:get(cached_key)
-  if cached_value ~= nil then return cached_value end
-  local value = {}
-  if history_file:exists() then
-    local content = history_file:read()
-    value = content ~= nil and vim.json.decode(content) or {}
+---@param filename string?
+---@return avante.ChatHistory
+function History.load(bufnr, filename)
+  local history_filepath = filename and History.get_filepath(bufnr, filename)
+    or History.get_latest_filepath(bufnr, false)
+  if history_filepath:exists() then
+    local content = history_filepath:read()
+    if content ~= nil then
+      local history = vim.json.decode(content)
+      history.filename = filepath_to_filename(history_filepath)
+      return history
+    end
   end
-  history_file_cache:set(cached_key, value)
-  return value
+  return History.new(bufnr)
 end
 
 -- Saves the chat history for the given buffer.
 ---@param bufnr integer
----@param history avante.ChatHistoryEntry[]
-History.save = vim.schedule_wrap(function(bufnr, history)
-  local history_file = History.get(bufnr)
-  local cached_key = tostring(history_file:absolute())
-  history_file:write(vim.json.encode(history), "w")
-  history_file_cache:set(cached_key, history)
-end)
+---@param history avante.ChatHistory
+History.save = function(bufnr, history)
+  local history_filepath = History.get_filepath(bufnr, history.filename)
+  history_filepath:write(vim.json.encode(history), "w")
+  History.save_latest_filename(bufnr, history.filename)
+end
 
 P.history = History
 

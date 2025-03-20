@@ -209,22 +209,26 @@ M.role_map = {
   assistant = "assistant",
 }
 
+function M:is_disable_stream() return false end
+
 M.parse_messages = OpenAI.parse_messages
 
 M.parse_response = OpenAI.parse_response
 
-function M.parse_curl_args(provider, prompt_opts)
+M.is_reasoning_model = OpenAI.is_reasoning_model
+
+function M:parse_curl_args(prompt_opts)
   -- refresh token synchronously, only if it has expired
   -- (this should rarely happen, as we refresh the token in the background)
   H.refresh_token(false, false)
 
-  local provider_conf, request_body = P.parse_config(provider)
+  local provider_conf, request_body = P.parse_config(self)
   local disable_tools = provider_conf.disable_tools or false
 
   local tools = {}
   if not disable_tools and prompt_opts.tools then
     for _, tool in ipairs(prompt_opts.tools) do
-      table.insert(tools, OpenAI.transform_tool(tool))
+      table.insert(tools, OpenAI:transform_tool(tool))
     end
   end
 
@@ -241,7 +245,7 @@ function M.parse_curl_args(provider, prompt_opts)
     },
     body = vim.tbl_deep_extend("force", {
       model = provider_conf.model,
-      messages = M.parse_messages(prompt_opts),
+      messages = self:parse_messages(prompt_opts),
       stream = true,
       tools = tools,
     }, request_body),

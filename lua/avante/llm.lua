@@ -19,6 +19,109 @@ M.CANCEL_PATTERN = "AvanteLLMEscape"
 
 local group = api.nvim_create_augroup("avante_llm", { clear = true })
 
+---@param content AvanteLLMMessageContent
+---@param cb fun(title: string | nil): nil
+function M.summarize_chat_thread_title(content, cb)
+  local system_prompt =
+    [[Summarize the content as a title for the chat thread. The title should be a concise and informative summary of the conversation, capturing the main points and key takeaways. It should be no longer than 100 words and should be written in a clear and engaging style. The title should be suitable for use as the title of a chat thread on a messaging platform or other communication medium.]]
+  local response_content = ""
+  local provider = Providers[Config.memory_summary_provider or Config.provider]
+  M.curl({
+    provider = provider,
+    prompt_opts = {
+      system_prompt = system_prompt,
+      messages = {
+        { role = "user", content = content },
+      },
+    },
+    handler_opts = {
+      on_start = function(_) end,
+      on_chunk = function(chunk)
+        if not chunk then return end
+        response_content = response_content .. chunk
+      end,
+      on_stop = function(stop_opts)
+        if stop_opts.error ~= nil then
+          Utils.error(string.format("summarize failed: %s", vim.inspect(stop_opts.error)))
+          return
+        end
+        if stop_opts.reason == "complete" then
+          response_content = Utils.trim_think_content(response_content)
+          response_content = Utils.trim(response_content, { prefix = "\n", suffix = "\n" })
+          response_content = Utils.trim(response_content, { prefix = '"', suffix = '"' })
+          local title = response_content
+          cb(title)
+        end
+      end,
+    },
+  })
+end
+
+---@param bufnr integer
+---@param history avante.ChatHistory
+---@param cb fun(memory: avante.ChatMemory | nil): nil
+function M.summarize_memory(bufnr, history, cb)
+  local system_prompt =
+    [[Summarize the following conversation to extract the most critical information (such as languages used, conversation style, tech stack, considerations, user information, etc.) for memory in subsequent conversations. Since it is for memory purposes, be detailed and rigorous to ensure that no information from previous summaries is lost in the newly generated summary.]]
+  local entries = Utils.history.filter_active_entries(history.entries)
+  if #entries == 0 then
+    cb(nil)
+    return
+  end
+  if history.memory then
+    system_prompt = system_prompt .. "\n\nThe previous summary is:\n\n" .. history.memory.content
+    entries = vim
+      .iter(entries)
+      :filter(function(entry) return entry.timestamp > history.memory.last_summarized_timestamp end)
+      :totable()
+  end
+  if #entries == 0 then
+    cb(history.memory)
+    return
+  end
+  local history_messages = Utils.history.entries_to_llm_messages(entries)
+  history_messages = vim.list_slice(history_messages, 1, 4)
+  if #history_messages == 0 then
+    cb(history.memory)
+    return
+  end
+  Utils.debug("summarize memory", #history_messages, history_messages[#history_messages].content)
+  local response_content = ""
+  local provider = Providers[Config.memory_summary_provider or Config.provider]
+  M.curl({
+    provider = provider,
+    prompt_opts = {
+      system_prompt = system_prompt,
+      messages = {
+        { role = "user", content = vim.json.encode(history_messages) },
+      },
+    },
+    handler_opts = {
+      on_start = function(_) end,
+      on_chunk = function(chunk)
+        if not chunk then return end
+        response_content = response_content .. chunk
+      end,
+      on_stop = function(stop_opts)
+        if stop_opts.error ~= nil then
+          Utils.error(string.format("summarize failed: %s", vim.inspect(stop_opts.error)))
+          return
+        end
+        if stop_opts.reason == "complete" then
+          response_content = Utils.trim_think_content(response_content)
+          local memory = {
+            content = response_content,
+            last_summarized_timestamp = entries[#entries].timestamp,
+          }
+          history.memory = memory
+          Path.history.save(bufnr, history)
+          cb(memory)
+        end
+      end,
+    },
+  })
+end
+
 ---@param opts AvanteGeneratePromptsOptions
 ---@return AvantePromptOptions
 function M.generate_prompts(opts)
@@ -49,18 +152,27 @@ function M.generate_prompts(opts)
   local system_info = Utils.get_system_info()
 
   local template_opts = {
-    use_xml_format = provider.use_xml_format,
     ask = opts.ask, -- TODO: add mode without ask instruction
     code_lang = opts.code_lang,
     selected_files = opts.selected_files,
     selected_code = opts.selected_code,
+    recently_viewed_files = opts.recently_viewed_files,
     project_context = opts.project_context,
     diagnostics = opts.diagnostics,
     system_info = system_info,
     model_name = provider.model or "unknown",
+    memory = opts.memory,
   }
 
   local system_prompt = Path.prompts.render_mode(mode, template_opts)
+
+  if Config.system_prompt ~= nil then
+    local custom_system_prompt = Config.system_prompt
+    if type(custom_system_prompt) == "function" then custom_system_prompt = custom_system_prompt() end
+    if custom_system_prompt ~= nil and custom_system_prompt ~= "" and custom_system_prompt ~= "null" then
+      system_prompt = system_prompt .. "\n\n" .. custom_system_prompt
+    end
+  end
 
   ---@type AvanteLLMMessage[]
   local messages = {}
@@ -80,12 +192,13 @@ function M.generate_prompts(opts)
     if code_context ~= "" then table.insert(messages, { role = "user", content = code_context }) end
   end
 
+  if opts.memory ~= nil and opts.memory ~= "" and opts.memory ~= "null" then
+    local memory = Path.prompts.render_file("_memory.avanterules", template_opts)
+    if memory ~= "" then table.insert(messages, { role = "user", content = memory }) end
+  end
+
   if instructions then
-    if opts.use_xml_format then
-      table.insert(messages, { role = "user", content = string.format("<question>%s</question>", instructions) })
-    else
-      table.insert(messages, { role = "user", content = string.format("QUESTION:\n%s", instructions) })
-    end
+    table.insert(messages, { role = "user", content = string.format("<question>%s</question>", instructions) })
   end
 
   local remaining_tokens = max_tokens - Utils.tokens.calculate_tokens(system_prompt)
@@ -150,6 +263,205 @@ function M.calculate_tokens(opts)
   return tokens
 end
 
+local parse_headers = function(headers_file)
+  local headers = {}
+  local file = io.open(headers_file, "r")
+  if file then
+    for line in file:lines() do
+      line = line:gsub("\r$", "")
+      local key, value = line:match("^%s*(.-)%s*:%s*(.*)$")
+      if key and value then headers[key] = value end
+    end
+    file:close()
+  end
+  return headers
+end
+
+---@param opts avante.CurlOpts
+function M.curl(opts)
+  local provider = opts.provider
+  local prompt_opts = opts.prompt_opts
+  local handler_opts = opts.handler_opts
+
+  ---@type AvanteCurlOutput
+  local spec = provider:parse_curl_args(prompt_opts)
+
+  ---@type string
+  local current_event_state = nil
+  local resp_ctx = {}
+
+  ---@param line string
+  local function parse_stream_data(line)
+    local event = line:match("^event: (.+)$")
+    if event then
+      current_event_state = event
+      return
+    end
+    local data_match = line:match("^data: (.+)$")
+    if data_match then provider:parse_response(resp_ctx, data_match, current_event_state, handler_opts) end
+  end
+
+  local function parse_response_without_stream(data)
+    provider:parse_response_without_stream(data, current_event_state, handler_opts)
+  end
+
+  local completed = false
+
+  local active_job
+
+  local temp_file = fn.tempname()
+  local curl_body_file = temp_file .. "-request-body.json"
+  local json_content = vim.json.encode(spec.body)
+  fn.writefile(vim.split(json_content, "\n"), curl_body_file)
+
+  Utils.debug("curl body file:", curl_body_file)
+
+  local headers_file = temp_file .. "-headers.txt"
+
+  Utils.debug("curl headers file:", headers_file)
+
+  local function cleanup()
+    if Config.debug then return end
+    vim.schedule(function()
+      fn.delete(curl_body_file)
+      fn.delete(headers_file)
+    end)
+  end
+
+  local headers_reported = false
+
+  active_job = curl.post(spec.url, {
+    headers = spec.headers,
+    proxy = spec.proxy,
+    insecure = spec.insecure,
+    body = curl_body_file,
+    raw = spec.rawArgs,
+    dump = { "-D", headers_file },
+    stream = function(err, data, _)
+      if not headers_reported and opts.on_response_headers then
+        headers_reported = true
+        opts.on_response_headers(parse_headers(headers_file))
+      end
+      if err then
+        completed = true
+        handler_opts.on_stop({ reason = "error", error = err })
+        return
+      end
+      if not data then return end
+      vim.schedule(function()
+        if Config[Config.provider] == nil and provider.parse_stream_data ~= nil then
+          if provider.parse_response ~= nil then
+            Utils.warn(
+              "parse_stream_data and parse_response are mutually exclusive, and thus parse_response will be ignored. Make sure that you handle the incoming data correctly.",
+              { once = true }
+            )
+          end
+          provider:parse_stream_data(resp_ctx, data, handler_opts)
+        else
+          if provider.parse_stream_data ~= nil then
+            provider:parse_stream_data(resp_ctx, data, handler_opts)
+          else
+            parse_stream_data(data)
+          end
+        end
+      end)
+    end,
+    on_error = function(err)
+      if err.exit == 23 then
+        local xdg_runtime_dir = os.getenv("XDG_RUNTIME_DIR")
+        if not xdg_runtime_dir or fn.isdirectory(xdg_runtime_dir) == 0 then
+          Utils.error(
+            "$XDG_RUNTIME_DIR="
+              .. xdg_runtime_dir
+              .. " is set but does not exist. curl could not write output. Please make sure it exists, or unset.",
+            { title = "Avante" }
+          )
+        elseif not uv.fs_access(xdg_runtime_dir, "w") then
+          Utils.error(
+            "$XDG_RUNTIME_DIR="
+              .. xdg_runtime_dir
+              .. " exists but is not writable. curl could not write output. Please make sure it is writable, or unset.",
+            { title = "Avante" }
+          )
+        end
+      end
+      active_job = nil
+      completed = true
+      cleanup()
+      handler_opts.on_stop({ reason = "error", error = err })
+    end,
+    callback = function(result)
+      active_job = nil
+      cleanup()
+      local headers_map = vim.iter(result.headers):fold({}, function(acc, value)
+        local pieces = vim.split(value, ":")
+        local key = pieces[1]
+        local remain = vim.list_slice(pieces, 2)
+        if not remain then return acc end
+        local val = Utils.trim_spaces(table.concat(remain, ":"))
+        acc[key] = val
+        return acc
+      end)
+      if result.status >= 400 then
+        if provider.on_error then
+          provider.on_error(result)
+        else
+          Utils.error("API request failed with status " .. result.status, { once = true, title = "Avante" })
+        end
+        if result.status == 429 then
+          local retry_after = 10
+          if headers_map["retry-after"] then retry_after = tonumber(headers_map["retry-after"]) or 10 end
+          handler_opts.on_stop({ reason = "rate_limit", retry_after = retry_after })
+          return
+        end
+        vim.schedule(function()
+          if not completed then
+            completed = true
+            handler_opts.on_stop({
+              reason = "error",
+              error = "API request failed with status " .. result.status .. ". Body: " .. vim.inspect(result.body),
+            })
+          end
+        end)
+      end
+
+      -- If stream is not enabled, then handle the response here
+      if provider:is_disable_stream() and result.status == 200 then
+        vim.schedule(function()
+          completed = true
+          parse_response_without_stream(result.body)
+        end)
+      end
+
+      if result.status == 200 and spec.url:match("https://openrouter.ai") then
+        local content_type = headers_map["content-type"]
+        if content_type and content_type:match("text/html") then
+          handler_opts.on_stop({
+            reason = "error",
+            error = "Your openrouter endpoint setting is incorrect, please set it to https://openrouter.ai/api/v1",
+          })
+        end
+      end
+    end,
+  })
+
+  api.nvim_create_autocmd("User", {
+    group = group,
+    pattern = M.CANCEL_PATTERN,
+    once = true,
+    callback = function()
+      -- Error: cannot resume dead coroutine
+      if active_job then
+        xpcall(function() active_job:shutdown() end, function(err) return err end)
+        Utils.debug("LLM request cancelled")
+        active_job = nil
+      end
+    end,
+  })
+
+  return active_job
+end
+
 ---@param opts AvanteLLMStreamOptions
 function M._stream(opts)
   local provider = opts.provider or Providers[Config.provider]
@@ -158,8 +470,7 @@ function M._stream(opts)
 
   local prompt_opts = M.generate_prompts(opts)
 
-  ---@type string
-  local current_event_state = nil
+  local resp_headers = {}
 
   ---@type AvanteHandlerOptions
   local handler_opts = {
@@ -174,7 +485,16 @@ function M._stream(opts)
           local new_opts = vim.tbl_deep_extend("force", opts, {
             tool_histories = tool_histories,
           })
-          return M._stream(new_opts)
+          if provider.get_rate_limit_sleep_time then
+            local sleep_time = provider:get_rate_limit_sleep_time(resp_headers)
+            if sleep_time and sleep_time > 0 then
+              Utils.info("Rate limit reached. Sleeping for " .. sleep_time .. " seconds ...")
+              vim.defer_fn(function() M._stream(new_opts) end, sleep_time * 1000)
+              return
+            end
+          end
+          M._stream(new_opts)
+          return
         end
         local tool_use = tool_use_list[tool_use_index]
         ---@param result string | nil
@@ -227,160 +547,17 @@ function M._stream(opts)
         end, stop_opts.retry_after * 1000)
         return
       end
+      stop_opts.tool_histories = opts.tool_histories
       return opts.on_stop(stop_opts)
     end,
   }
 
-  ---@type AvanteCurlOutput
-  local spec = provider.parse_curl_args(provider, prompt_opts)
-
-  local resp_ctx = {}
-
-  ---@param line string
-  local function parse_stream_data(line)
-    local event = line:match("^event: (.+)$")
-    if event then
-      current_event_state = event
-      return
-    end
-    local data_match = line:match("^data: (.+)$")
-    if data_match then provider.parse_response(resp_ctx, data_match, current_event_state, handler_opts) end
-  end
-
-  local function parse_response_without_stream(data)
-    provider.parse_response_without_stream(data, current_event_state, handler_opts)
-  end
-
-  local completed = false
-
-  local active_job
-
-  local curl_body_file = fn.tempname() .. ".json"
-  local json_content = vim.json.encode(spec.body)
-  fn.writefile(vim.split(json_content, "\n"), curl_body_file)
-
-  Utils.debug("curl body file:", curl_body_file)
-
-  local function cleanup()
-    if Config.debug then return end
-    vim.schedule(function() fn.delete(curl_body_file) end)
-  end
-
-  active_job = curl.post(spec.url, {
-    headers = spec.headers,
-    proxy = spec.proxy,
-    insecure = spec.insecure,
-    body = curl_body_file,
-    raw = spec.rawArgs,
-    stream = function(err, data, _)
-      if err then
-        completed = true
-        handler_opts.on_stop({ reason = "error", error = err })
-        return
-      end
-      if not data then return end
-      vim.schedule(function()
-        if Config[Config.provider] == nil and provider.parse_stream_data ~= nil then
-          if provider.parse_response ~= nil then
-            Utils.warn(
-              "parse_stream_data and parse_response are mutually exclusive, and thus parse_response will be ignored. Make sure that you handle the incoming data correctly.",
-              { once = true }
-            )
-          end
-          provider.parse_stream_data(resp_ctx, data, handler_opts)
-        else
-          if provider.parse_stream_data ~= nil then
-            provider.parse_stream_data(resp_ctx, data, handler_opts)
-          else
-            parse_stream_data(data)
-          end
-        end
-      end)
-    end,
-    on_error = function(err)
-      if err.exit == 23 then
-        local xdg_runtime_dir = os.getenv("XDG_RUNTIME_DIR")
-        if not xdg_runtime_dir or fn.isdirectory(xdg_runtime_dir) == 0 then
-          Utils.error(
-            "$XDG_RUNTIME_DIR="
-              .. xdg_runtime_dir
-              .. " is set but does not exist. curl could not write output. Please make sure it exists, or unset.",
-            { title = "Avante" }
-          )
-        elseif not uv.fs_access(xdg_runtime_dir, "w") then
-          Utils.error(
-            "$XDG_RUNTIME_DIR="
-              .. xdg_runtime_dir
-              .. " exists but is not writable. curl could not write output. Please make sure it is writable, or unset.",
-            { title = "Avante" }
-          )
-        end
-      end
-      active_job = nil
-      completed = true
-      cleanup()
-      handler_opts.on_stop({ reason = "error", error = err })
-    end,
-    callback = function(result)
-      active_job = nil
-      cleanup()
-      if result.status >= 400 then
-        if provider.on_error then
-          provider.on_error(result)
-        else
-          Utils.error("API request failed with status " .. result.status, { once = true, title = "Avante" })
-        end
-        if result.status == 429 then
-          local headers_map = vim.iter(result.headers):fold({}, function(acc, value)
-            local pieces = vim.split(value, ":")
-            local key = pieces[1]
-            local remain = vim.list_slice(pieces, 2)
-            if not remain then return acc end
-            local val = Utils.trim_spaces(table.concat(remain, ":"))
-            acc[key] = val
-            return acc
-          end)
-          local retry_after = 10
-          if headers_map["retry-after"] then retry_after = tonumber(headers_map["retry-after"]) or 10 end
-          handler_opts.on_stop({ reason = "rate_limit", retry_after = retry_after })
-          return
-        end
-        vim.schedule(function()
-          if not completed then
-            completed = true
-            handler_opts.on_stop({
-              reason = "error",
-              error = "API request failed with status " .. result.status .. ". Body: " .. vim.inspect(result.body),
-            })
-          end
-        end)
-      end
-
-      -- If stream is not enabled, then handle the response here
-      if spec.body.stream == false and result.status == 200 then
-        vim.schedule(function()
-          completed = true
-          parse_response_without_stream(result.body)
-        end)
-      end
-    end,
+  return M.curl({
+    provider = provider,
+    prompt_opts = prompt_opts,
+    handler_opts = handler_opts,
+    on_response_headers = function(headers) resp_headers = headers end,
   })
-
-  api.nvim_create_autocmd("User", {
-    group = group,
-    pattern = M.CANCEL_PATTERN,
-    once = true,
-    callback = function()
-      -- Error: cannot resume dead coroutine
-      if active_job then
-        xpcall(function() active_job:shutdown() end, function(err) return err end)
-        Utils.debug("LLM request cancelled")
-        active_job = nil
-      end
-    end,
-  })
-
-  return active_job
 end
 
 local function _merge_response(first_response, second_response, opts)

@@ -2,7 +2,8 @@
 ---@field deployment string
 ---@field api_version string
 ---@field temperature number
----@field max_tokens number
+---@field max_completion_tokens number
+---@field reasoning_effort? string
 
 local Utils = require("avante.utils")
 local P = require("avante.providers")
@@ -13,12 +14,11 @@ local M = {}
 
 M.api_key_name = "AZURE_OPENAI_API_KEY"
 
-M.parse_messages = O.parse_messages
-M.parse_response = O.parse_response
-M.parse_response_without_stream = O.parse_response_without_stream
+-- Inherit from OpenAI class
+setmetatable(M, { __index = O })
 
-function M.parse_curl_args(provider, prompt_opts)
-  local provider_conf, request_body = P.parse_config(provider)
+function M:parse_curl_args(prompt_opts)
+  local provider_conf, request_body = P.parse_config(self)
 
   local headers = {
     ["Content-Type"] = "application/json",
@@ -26,17 +26,13 @@ function M.parse_curl_args(provider, prompt_opts)
 
   if P.env.require_api_key(provider_conf) then
     if provider_conf.entra then
-      headers["Authorization"] = "Bearer " .. provider.parse_api_key()
+      headers["Authorization"] = "Bearer " .. self.parse_api_key()
     else
-      headers["api-key"] = provider.parse_api_key()
+      headers["api-key"] = self.parse_api_key()
     end
   end
 
-  -- NOTE: When using "o" series set the supported parameters only
-  if O.is_o_series_model(provider_conf.model) then
-    request_body.max_tokens = nil
-    request_body.temperature = 1
-  end
+  self.set_allowed_params(provider_conf, request_body)
 
   return {
     url = Utils.url_join(
@@ -52,7 +48,7 @@ function M.parse_curl_args(provider, prompt_opts)
     insecure = provider_conf.allow_insecure,
     headers = headers,
     body = vim.tbl_deep_extend("force", {
-      messages = M.parse_messages(prompt_opts),
+      messages = self:parse_messages(prompt_opts),
       stream = true,
     }, request_body),
   }

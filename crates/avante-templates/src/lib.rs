@@ -16,6 +16,13 @@ impl State<'_> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct SelectedCode {
+    path: String,
+    content: Option<String>,
+    file_type: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct SelectedFile {
     path: String,
     content: Option<String>,
@@ -24,15 +31,17 @@ struct SelectedFile {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TemplateContext {
-    use_xml_format: bool,
     ask: bool,
     code_lang: String,
     selected_files: Option<Vec<SelectedFile>>,
-    selected_code: Option<String>,
+    selected_code: Option<SelectedCode>,
+    recently_viewed_files: Option<Vec<String>>,
+    relevant_files: Option<Vec<String>>,
     project_context: Option<String>,
     diagnostics: Option<String>,
     system_info: Option<String>,
     model_name: Option<String>,
+    memory: Option<String>,
 }
 
 // Given the file name registered after add, the context table in Lua, resulted in a formatted
@@ -49,15 +58,17 @@ fn render(state: &State, template: &str, context: TemplateContext) -> LuaResult<
 
             Ok(jinja_template
                 .render(context! {
-                  use_xml_format => context.use_xml_format,
                   ask => context.ask,
                   code_lang => context.code_lang,
                   selected_files => context.selected_files,
                   selected_code => context.selected_code,
+                  recently_viewed_files => context.recently_viewed_files,
+                  relevant_files => context.relevant_files,
                   project_context => context.project_context,
                   diagnostics => context.diagnostics,
                   system_info => context.system_info,
                   model_name => context.model_name,
+                  memory => context.memory,
                 })
                 .map_err(LuaError::external)
                 .unwrap())
