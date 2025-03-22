@@ -8,6 +8,7 @@ local lsp = vim.lsp
 ---@field file avante.utils.file
 ---@field history avante.utils.history
 ---@field environment avante.utils.environment
+---@field lsp avante.utils.lsp
 local M = {}
 
 setmetatable(M, {
@@ -313,18 +314,6 @@ function M.get_hl(name)
   return api.nvim_get_hl(0, { name = name })
 end
 
-M.lsp = {}
-
----@alias vim.lsp.Client.filter {id?: number, bufnr?: number, name?: string, method?: string, filter?:fun(client: vim.lsp.Client):boolean}
-
----@param opts? vim.lsp.Client.filter
----@return vim.lsp.Client[]
-function M.lsp.get_clients(opts)
-  ---@type vim.lsp.Client[]
-  local ret = vim.lsp.get_clients(opts)
-  return (opts and opts.filter) and vim.tbl_filter(opts.filter, ret) or ret
-end
-
 --- vendor from lazy.nvim for early access and override
 
 ---@param path string
@@ -455,12 +444,14 @@ function M.get_winid(bufnr)
 end
 
 function M.unlock_buf(bufnr)
+  vim.bo[bufnr].readonly = false
   vim.bo[bufnr].modified = false
   vim.bo[bufnr].modifiable = true
 end
 
 function M.lock_buf(bufnr)
   vim.cmd("stopinsert")
+  vim.bo[bufnr].readonly = true
   vim.bo[bufnr].modified = false
   vim.bo[bufnr].modifiable = false
 end
@@ -1177,6 +1168,29 @@ function M.random_string(length)
     table.insert(result, charset:sub(rand, rand))
   end
   return table.concat(result)
+end
+
+function M.is_left_adjacent(win_a, win_b)
+  if not vim.api.nvim_win_is_valid(win_a) or not vim.api.nvim_win_is_valid(win_b) then return false end
+
+  local _, col_a = unpack(vim.fn.win_screenpos(win_a))
+  local _, col_b = unpack(vim.fn.win_screenpos(win_b))
+  local width_a = vim.api.nvim_win_get_width(win_a)
+
+  local right_edge_a = col_a + width_a
+
+  return right_edge_a + 1 == col_b
+end
+
+function M.is_top_adjacent(win_a, win_b)
+  local row_a, _ = unpack(vim.fn.win_screenpos(win_a))
+  local row_b, _ = unpack(vim.fn.win_screenpos(win_b))
+  local height_a = vim.api.nvim_win_get_height(win_a)
+  return row_a + height_a + 1 == row_b
+end
+
+function M.should_hidden_border(win_a, win_b)
+  return M.is_left_adjacent(win_a, win_b) or M.is_top_adjacent(win_a, win_b)
 end
 
 return M

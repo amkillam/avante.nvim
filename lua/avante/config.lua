@@ -390,6 +390,7 @@ M._defaults = {
     edit = "<leader>ae",
     refresh = "<leader>ar",
     focus = "<leader>af",
+    stop = "<leader>aS",
     toggle = {
       default = "<leader>at",
       debug = "<leader>ad",

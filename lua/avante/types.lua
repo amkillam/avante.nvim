@@ -245,7 +245,7 @@ vim.g.avante_login = vim.g.avante_login
 ---@field usage? AvanteLLMUsage
 ---
 ---@class AvanteLLMStopCallbackOptions
----@field reason "complete" | "tool_use" | "error" | "rate_limit"
+---@field reason "complete" | "tool_use" | "error" | "rate_limit" | "cancelled"
 ---@field error? string | table
 ---@field usage? AvanteLLMUsage
 ---@field tool_use_list? AvanteLLMToolUse[]
@@ -400,4 +400,8 @@ vim.g.avante_login = vim.g.avante_login
 ---@field prompt_opts AvantePromptOptions
 ---@field handler_opts AvanteHandlerOptions
 ---@field on_response_headers? fun(headers: table<string, string>): nil
+---
+---@class avante.lsp.Definition
+---@field content string
+---@field uri string
 ---
