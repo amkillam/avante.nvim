@@ -86,6 +86,11 @@ end, {
 })
 cmd("Chat", function() require("avante.api").ask({ ask = false }) end, { desc = "avante: chat with the codebase" })
 cmd("Toggle", function() require("avante").toggle() end, { desc = "avante: toggle AI panel" })
+cmd(
+  "ToggleConfirm",
+  function() require("avante.config").confirm_prompt.enabled = not require("avante.config").confirm_prompt end,
+  { desc = "avante: toggle confirm prompts" }
+)
 cmd("Build", function(opts)
   local args = {}
   for _, arg in ipairs(opts.fargs) do

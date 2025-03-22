@@ -45,6 +45,9 @@ M._defaults = {
     endpoint = "https://api.openai.com/v1", -- The API endpoint for RAG service
     docker_extra_args = "", -- Extra arguments to pass to the docker command
   },
+  confirm_prompt = {
+    enabled = true,
+  },
   web_search_engine = {
     provider = "tavily",
     providers = {

@@ -24,6 +24,7 @@ end
 ---@param opts? { focus?: boolean }
 ---@return avante.ui.Confirm | nil
 function M.confirm(message, callback, opts)
+  if Config.confirm_prompt.enabled == false then return callback(true) end
   local Confirm = require("avante.ui.confirm")
   local sidebar = require("avante").get()
   if not sidebar or not sidebar.input_container or not sidebar.input_container.winid then
