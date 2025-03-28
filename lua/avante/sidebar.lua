@@ -205,7 +205,7 @@ end
 function Sidebar:shutdown()
   Llm.cancel_inflight_request()
   self:close()
-  vim.cmd("stopinsert")
+  vim.cmd("noautocmd stopinsert")
 end
 
 ---@return boolean
@@ -252,6 +252,7 @@ end
 ---@field is_searching boolean
 ---@field is_replacing boolean
 ---@field is_thinking boolean
+---@field waiting_for_breakline boolean
 ---@field last_search_tag_start_line integer
 ---@field last_replace_tag_start_line integer
 ---@field last_think_tag_start_line integer
@@ -278,17 +279,23 @@ local function transform_result_content(selected_files, result_content, prev_fil
 
   local current_filepath
 
+  local waiting_for_breakline = false
   local i = 1
   while true do
     if i > #result_lines then break end
     local line_content = result_lines[i]
-    if line_content:match("<[Ff][Ii][Ll][Ee][Pp][Aa][Tt][Hh]>.+</[Ff][Ii][Ll][Ee][Pp][Aa][Tt][Hh]>") then
-      local filepath = line_content:match("<[Ff][Ii][Ll][Ee][Pp][Aa][Tt][Hh]>(.+)</[Ff][Ii][Ll][Ee][Pp][Aa][Tt][Hh]>")
-      if filepath then
-        current_filepath = filepath
-        table.insert(transformed_lines, string.format("Filepath: %s", filepath))
-        goto continue
+    local matched_filepath =
+      line_content:match("<[Ff][Ii][Ll][Ee][Pp][Aa][Tt][Hh]>(.+)</[Ff][Ii][Ll][Ee][Pp][Aa][Tt][Hh]>")
+    if matched_filepath then
+      if i > 1 then
+        local prev_line = result_lines[i - 1]
+        if prev_line and prev_line:match("^%s*```%w+$") then
+          transformed_lines = vim.list_slice(transformed_lines, 1, #transformed_lines - 1)
+        end
       end
+      current_filepath = matched_filepath
+      table.insert(transformed_lines, string.format("Filepath: %s", matched_filepath))
+      goto continue
     end
     if line_content:match("^%s*<[Ss][Ee][Aa][Rr][Cc][Hh]>") then
       is_searching = true
@@ -415,6 +422,7 @@ local function transform_result_content(selected_files, result_content, prev_fil
       if search_start_tag_idx_in_transformed_lines > 0 then
         transformed_lines = vim.list_slice(transformed_lines, 1, search_start_tag_idx_in_transformed_lines - 1)
       end
+      waiting_for_breakline = true
       vim.list_extend(transformed_lines, {
         string.format("Replace lines: %d-%d", start_line, end_line),
         string.format("```%s", match_filetype),
@@ -448,6 +456,8 @@ local function transform_result_content(selected_files, result_content, prev_fil
       is_replacing = false
       local prev_line = result_lines[i - 1]
       if not (prev_line and prev_line:match("^%s*```$")) then table.insert(transformed_lines, "```") end
+      local next_line = result_lines[i + 1]
+      if next_line and next_line:match("^%s*```%s*$") then i = i + 1 end
       goto continue
     elseif line_content == "<think>" then
       is_thinking = true
@@ -456,7 +466,11 @@ local function transform_result_content(selected_files, result_content, prev_fil
     elseif line_content == "</think>" then
       is_thinking = false
       last_think_tag_end_line = i
+    elseif line_content:match("^%s*```%s*$") then
+      local prev_line = result_lines[i - 1]
+      if prev_line and prev_line:match("^%s*```$") then goto continue end
     end
+    waiting_for_breakline = false
     table.insert(transformed_lines, line_content)
     ::continue::
     i = i + 1
@@ -466,6 +480,7 @@ local function transform_result_content(selected_files, result_content, prev_fil
   return {
     current_filepath = current_filepath,
     content = table.concat(transformed_lines, "\n"),
+    waiting_for_breakline = waiting_for_breakline,
     is_searching = is_searching,
     is_replacing = is_replacing,
     is_thinking = is_thinking,
@@ -838,10 +853,6 @@ local function insert_conflict_contents(bufnr, snippets)
 
   for _, snippet in ipairs(snippets) do
     local start_line, end_line = unpack(snippet.range)
-    if start_line > end_line then
-      start_line = start_line + 1
-      end_line = end_line + 1
-    end
 
     local result = {}
     table.insert(result, "<<<<<<< HEAD")
@@ -975,7 +986,10 @@ local function minimize_snippet(original_lines, snippet)
     local start_a, count_a, start_b, count_b = unpack(hunk)
     ---@type AvanteCodeSnippet
     local new_snippet = {
-      range = { start_line + start_a - 1, start_line + start_a + count_a - 2 },
+      range = {
+        count_a > 0 and start_line + start_a - 1 or start_line + start_a,
+        start_line + start_a + math.max(count_a, 1) - 2,
+      },
       content = table.concat(vim.list_slice(snippet_lines, start_b, start_b + count_b - 1), "\n"),
       lang = snippet.lang,
       explanation = snippet.explanation,
@@ -1368,7 +1382,7 @@ function Sidebar:apply(current_cursor)
 
           local function process(winid)
             api.nvim_set_current_win(winid)
-            api.nvim_feedkeys(api.nvim_replace_termcodes("<Esc>", true, false, true), "n", true)
+            vim.cmd("noautocmd stopinsert")
             Diff.add_visited_buffer(bufnr)
             Diff.process(bufnr)
             api.nvim_win_set_cursor(winid, { 1, 0 })
@@ -1408,7 +1422,7 @@ function Sidebar:apply(current_cursor)
       insert_conflict_contents(bufnr, snippets)
       local function process(winid)
         api.nvim_set_current_win(winid)
-        api.nvim_feedkeys(api.nvim_replace_termcodes("<Esc>", true, false, true), "n", true)
+        vim.cmd("noautocmd stopinsert")
         Diff.add_visited_buffer(bufnr)
         Diff.process(bufnr)
         api.nvim_win_set_cursor(winid, { 1, 0 })
@@ -1890,10 +1904,7 @@ function Sidebar:on_mount(opts)
         then
           api.nvim_set_current_win(self.input_container.winid)
           vim.defer_fn(function()
-            if Config.windows.ask.start_insert then
-              Utils.debug("starting insert")
-              vim.cmd("startinsert!")
-            end
+            if Config.windows.ask.start_insert then vim.cmd("noautocmd startinsert!") end
           end, 300)
         end
       end
@@ -2311,6 +2322,7 @@ function Sidebar:add_chat_history(message, options)
   Path.history.save(self.code.bufnr, self.chat_history)
   if self.chat_history.title == "untitled" then
     Llm.summarize_chat_thread_title(message.content, function(title)
+      self:reload_chat_history()
       if title then self.chat_history.title = title end
       Path.history.save(self.code.bufnr, self.chat_history)
     end)
@@ -2430,7 +2442,7 @@ function Sidebar:create_selected_code_container()
       },
       buf_options = buf_options,
       win_options = {
-        winhl = base_win_options.winhl,
+        winhighlight = base_win_options.winhighlight,
       },
       size = {
         height = selected_code_size + 3,
@@ -2548,13 +2560,7 @@ function Sidebar:create_input_container(opts)
     local mode = "planning"
     if Config.behaviour.enable_cursor_planning_mode then mode = "cursor-planning" end
 
-    local provider_config = Config.get_provider_config(Config.provider)
-    local is_claude_model = provider_config
-      and provider_config.model
-      and (provider_config.model:lower():match("claude") or Config.provider:lower():match("claude"))
-    if Config.behaviour.enable_claude_text_editor_tool_mode and is_claude_model then
-      mode = "claude-text-editor-tool"
-    end
+    if Config.behaviour.enable_claude_text_editor_tool_mode then mode = "claude-text-editor-tool" end
 
     ---@type AvanteGeneratePromptsOptions
     local prompts_opts = {
@@ -2573,14 +2579,14 @@ function Sidebar:create_input_container(opts)
 
     if self.chat_history.memory then prompts_opts.memory = self.chat_history.memory.content end
 
-    if not summarize_memory or #history_messages < 12 then
+    if not summarize_memory or #history_messages < 8 then
       cb(prompts_opts)
       return
     end
 
-    prompts_opts.history_messages = vim.list_slice(prompts_opts.history_messages, 7)
+    prompts_opts.history_messages = vim.list_slice(prompts_opts.history_messages, 5)
 
-    Llm.summarize_memory(self.code.bufnr, self.chat_history, function(memory)
+    Llm.summarize_memory(self.code.bufnr, self.chat_history, nil, function(memory)
       if memory then prompts_opts.memory = memory.content end
       cb(prompts_opts)
     end)
@@ -2647,6 +2653,7 @@ function Sidebar:create_input_container(opts)
     self:update_content(content_prefix .. generating_text)
 
     local original_response = ""
+    local waiting_for_breakline = false
     local transformed_response = ""
     local displayed_response = ""
     local current_path = ""
@@ -2704,7 +2711,15 @@ function Sidebar:create_input_container(opts)
 
       local selected_files = self.file_selector:get_selected_files_contents()
 
-      local transformed = transform_result_content(selected_files, transformed_response .. chunk, current_path)
+      local transformed_response_
+      if waiting_for_breakline and chunk and chunk:sub(1, 1) ~= "\n" then
+        transformed_response_ = transformed_response .. "\n" .. chunk
+      else
+        transformed_response_ = transformed_response .. chunk
+      end
+
+      local transformed = transform_result_content(selected_files, transformed_response_, current_path)
+      waiting_for_breakline = transformed.waiting_for_breakline
       transformed_response = transformed.content
       if transformed.current_filepath and transformed.current_filepath ~= "" then
         current_path = transformed.current_filepath
@@ -2805,7 +2820,30 @@ function Sidebar:create_input_container(opts)
         on_chunk = on_chunk,
         on_stop = on_stop,
         on_tool_log = on_tool_log,
+        session_ctx = {},
       })
+
+      local function on_memory_summarize(dropped_history_messages)
+        local entries = Utils.history.filter_active_entries(self.chat_history.entries)
+
+        if self.chat_history.memory then
+          entries = vim
+            .iter(entries)
+            :filter(function(entry) return entry.timestamp > self.chat_history.memory.last_summarized_timestamp end)
+            :totable()
+        end
+
+        entries = vim.list_slice(entries, 1, #dropped_history_messages)
+
+        Llm.summarize_memory(self.code.bufnr, self.chat_history, entries, function(memory)
+          if memory then stream_options.memory = memory.content end
+          stream_options.history_messages =
+            vim.list_slice(stream_options.history_messages, #dropped_history_messages + 1)
+          Llm.stream(stream_options)
+        end)
+      end
+
+      stream_options.on_memory_summarize = on_memory_summarize
 
       Llm.stream(stream_options)
     end)
@@ -2880,7 +2918,7 @@ function Sidebar:create_input_container(opts)
 
   if Utils.in_visual_mode() then
     -- Exit visual mode
-    api.nvim_feedkeys(api.nvim_replace_termcodes("<Esc>", true, false, true), "n", true)
+    vim.cmd("noautocmd stopinsert")
   end
 
   self.input_container:map("n", Config.mappings.submit.normal, on_submit)
@@ -3028,18 +3066,26 @@ function Sidebar:create_input_container(opts)
     callback = function() close_hint() end,
   })
 
+  api.nvim_create_autocmd("WinClosed", {
+    group = self.augroup,
+    callback = function(args)
+      local closed_winid = tonumber(args.match)
+      if closed_winid == self.input_container.winid then close_hint() end
+    end,
+  })
+
   api.nvim_create_autocmd("BufEnter", {
     group = self.augroup,
     buffer = self.input_container.bufnr,
     callback = function()
-      if Config.windows.ask.start_insert then vim.cmd("startinsert!") end
+      if Config.windows.ask.start_insert then vim.cmd("noautocmd startinsert!") end
     end,
   })
 
   api.nvim_create_autocmd("BufLeave", {
     group = self.augroup,
     buffer = self.input_container.bufnr,
-    callback = function() vim.cmd("stopinsert") end,
+    callback = function() vim.cmd("noautocmd stopinsert") end,
   })
 
   -- Show hint in insert mode

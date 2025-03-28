@@ -149,6 +149,13 @@ function H.keymaps()
       function() require("avante.api").select_history() end,
       { desc = "avante: select history" }
     )
+
+    Utils.safe_keymap_set(
+      "n",
+      Config.mappings.files.add_all_buffers,
+      function() require("avante.api").add_buffer_files() end,
+      { desc = "avante: add all open buffers" }
+    )
   end
 
   if Config.behaviour.auto_suggestions then
@@ -244,19 +251,22 @@ function H.autocmds()
   end)
 
   local function setup_colors()
+    Utils.debug("Setting up avante colors")
     require("avante.highlights").setup()
-    -- local sidebar = require("avante").get()
-    -- if sidebar then sidebar:setup_colors() end
   end
 
   api.nvim_create_autocmd("ColorSchemePre", {
     group = H.augroup,
-    callback = setup_colors,
+    callback = function()
+      vim.schedule(function() setup_colors() end)
+    end,
   })
 
   api.nvim_create_autocmd("ColorScheme", {
     group = H.augroup,
-    callback = setup_colors,
+    callback = function()
+      vim.schedule(function() setup_colors() end)
+    end,
   })
 
   -- automatically setup Avante filetype to markdown

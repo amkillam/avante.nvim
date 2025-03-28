@@ -199,7 +199,7 @@ M._defaults = {
     model = "gpt-4o",
     timeout = 30000, -- Timeout in milliseconds, increase this for reasoning models
     temperature = 0,
-    max_completion_tokens = 16384, -- Increase this to include reasoning tokens (for reasoning models)
+    max_tokens = 16384, -- Increase this to include reasoning tokens (for reasoning models)
     reasoning_effort = "medium", -- low|medium|high, only used for reasoning models
   },
   ---@type AvanteSupportedProvider
@@ -219,7 +219,7 @@ M._defaults = {
     api_version = "2024-12-01-preview",
     timeout = 30000, -- Timeout in milliseconds, increase this for reasoning models
     temperature = 0,
-    max_completion_tokens = 20480, -- Increase this to include reasoning tokens (for reasoning models)
+    max_tokens = 20480, -- Increase this to include reasoning tokens (for reasoning models)
     reasoning_effort = "medium", -- low|medium|high, only used for reasoning models
   },
   ---@type AvanteSupportedProvider
@@ -347,7 +347,8 @@ M._defaults = {
     use_cwd_as_project_root = false,
   },
   history = {
-    max_tokens = 8192,
+    max_tokens = 4096,
+    carried_entry_count = nil,
     storage_path = vim.fn.stdpath("state") .. "/avante",
     paste = {
       extension = "png",
@@ -385,6 +386,10 @@ M._defaults = {
       normal = "<CR>",
       insert = "<C-s>",
     },
+    cancel = {
+      normal = { "<C-c>", "<Esc>", "q" },
+      insert = { "<C-c>" },
+    },
     -- NOTE: The following will be safely set by avante.nvim
     ask = "<leader>aa",
     edit = "<leader>ae",
@@ -414,6 +419,7 @@ M._defaults = {
     },
     files = {
       add_current = "<leader>ac", -- Add current buffer to selected files
+      add_all_buffers = "<leader>aB", -- Add all buffer files to selected files
     },
     select_model = "<leader>a?", -- Select model command
     select_history = "<leader>ah", -- Select history command
@@ -519,14 +525,6 @@ function M.setup(opts)
     end
     vim.validate({ vendors = { M._options.vendors, "table", true } })
     M.provider_names = vim.list_extend(M.provider_names, vim.tbl_keys(M._options.vendors))
-  end
-
-  if M._options.behaviour.enable_claude_text_editor_tool_mode and M._options.provider ~= "claude" then
-    Utils.warn(
-      "Claude text editor tool mode is only supported for claude provider! So it will be disabled!",
-      { title = "Avante" }
-    )
-    M._options.behaviour.enable_claude_text_editor_tool_mode = false
   end
 end
 

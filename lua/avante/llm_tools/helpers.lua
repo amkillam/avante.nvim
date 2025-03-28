@@ -63,4 +63,28 @@ function M.has_permission_to_access(abs_path)
   return not M.is_ignored(abs_path)
 end
 
+---@param path string
+---@return boolean
+function M.already_in_context(path)
+  local sidebar = require("avante").get()
+  if sidebar and sidebar.file_selector then
+    local rel_path = Utils.uniform_path(path)
+    return vim.tbl_contains(sidebar.file_selector.selected_filepaths, rel_path)
+  end
+  return false
+end
+
+---@param abs_path string
+---@return integer bufnr
+---@return string | nil error
+function M.get_bufnr(abs_path)
+  local sidebar = require("avante").get()
+  if not sidebar then return 0, "Avante sidebar not found" end
+  local current_winid = vim.api.nvim_get_current_win()
+  vim.api.nvim_set_current_win(sidebar.code.winid)
+  local bufnr = Utils.get_or_create_buffer_with_filepath(abs_path)
+  vim.api.nvim_set_current_win(current_winid)
+  return bufnr, nil
+end
+
 return M

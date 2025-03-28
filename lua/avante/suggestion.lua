@@ -95,7 +95,7 @@ L5:     pass
     },
     {
       role = "user",
-      content = '<question>{"insertSpaces":true,"tabSize":4,"indentSize":4,"position":{"row":1,"col":7}}</question>',
+      content = '{"insertSpaces":true,"tabSize":4,"indentSize":4,"position":{"row":1,"col":7}}',
     },
     {
       role = "assistant",
@@ -417,7 +417,7 @@ function Suggestion:accept()
       self:set_internal_move(true)
       api.nvim_win_set_cursor(0, { first_line_row, col })
       vim.cmd("normal! zz")
-      vim.cmd("startinsert")
+      vim.cmd("noautocmd startinsert")
       self:set_internal_move(false)
       return
     end
