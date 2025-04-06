@@ -67,7 +67,7 @@ M._defaults = {
         },
         ---@type WebSearchEngineProviderResponseBodyFormatter
         format_response_body = function(body)
-          if body.answer_box ~= nil then return body.answer_box.result, nil end
+          if body.answer_box ~= nil and body.answer_box.result ~= nil then return body.answer_box.result, nil end
           if body.organic_results ~= nil then
             local jsn = vim
               .iter(body.organic_results)
@@ -302,6 +302,18 @@ M._defaults = {
       __inherited_from = "openai",
       model = "gpt-4o-mini",
     },
+    aihubmix = {
+      __inherited_from = "openai",
+      endpoint = "https://aihubmix.com/v1",
+      model = "gpt-4o-2024-11-20",
+      api_key_name = "AIHUBMIX_API_KEY",
+    },
+    ["aihubmix-claude"] = {
+      __inherited_from = "claude",
+      endpoint = "https://aihubmix.com",
+      model = "claude-3-7-sonnet-20250219",
+      api_key_name = "AIHUBMIX_API_KEY",
+    },
   },
   ---Specify the special dual_boost mode
   ---1. enabled: Whether to enable dual_boost mode. Default to false.
@@ -440,7 +452,7 @@ M._defaults = {
       height = 8, -- Height of the input window in vertical layout
     },
     edit = {
-      border = "rounded",
+      border = { " ", " ", " ", " ", " ", " ", " ", " " },
       start_insert = true, -- Start insert mode when opening the edit window
     },
     ask = {
