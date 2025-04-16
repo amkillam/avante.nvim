@@ -13,8 +13,8 @@
   <a href="https://github.com/yetone/avante.nvim/actions/workflows/rust.yaml" target="_blank">
     <img src="https://img.shields.io/github/actions/workflow/status/yetone/avante.nvim/rust.yaml?style=flat-square&logo=rust&logoColor=ffffff&label=Rust+CI&labelColor=BC826A&color=347D39&event=push" alt="Rust CI status" />
   </a>
-  <a href="https://github.com/yetone/avante.nvim/actions/workflows/python.yaml" target="_blank">
-    <img src="https://img.shields.io/github/actions/workflow/status/yetone/avante.nvim/python.yaml?style=flat-square&logo=python&logoColor=ffffff&label=Python+CI&labelColor=3672A5&color=347D39&event=push" alt="Python CI status" />
+  <a href="https://github.com/yetone/avante.nvim/actions/workflows/pre-commit.yaml" target="_blank">
+    <img src="https://img.shields.io/github/actions/workflow/status/yetone/avante.nvim/pre-commit.yaml?style=flat-square&logo=pre-commit&logoColor=ffffff&label=pre-commit&labelColor=FAAF3F&color=347D39&event=push" alt="pre-commit status" />
   </a>
   <a href="https://discord.gg/QfnEFEdSjz" target="_blank">
     <img src="https://img.shields.io/discord/1302530866362323016?style=flat-square&logo=discord&label=Discord&logoColor=ffffff&labelColor=7376CF&color=268165" alt="Discord" />
@@ -27,7 +27,6 @@
 **avante.nvim** is a Neovim plugin designed to emulate the behaviour of the [Cursor](https://www.cursor.com) AI IDE. It provides users with AI-driven code suggestions and the ability to apply these recommendations directly to their source files with minimal effort.
 
 [查看中文版](README_zh.md)
-
 
 > [!NOTE]
 >
@@ -70,7 +69,7 @@ For building binary if you wish to build from source, then `cargo` is required. 
       model = "gpt-4o", -- your desired model (or use gpt-4o, etc.)
       timeout = 30000, -- Timeout in milliseconds, increase this for reasoning models
       temperature = 0,
-      max_tokens = 8192, -- Increase this to include reasoning tokens (for reasoning models)
+      max_completion_tokens = 8192, -- Increase this to include reasoning tokens (for reasoning models)
       --reasoning_effort = "medium", -- low|medium|high, only used for reasoning models
     },
   },
@@ -436,6 +435,7 @@ _See [config.lua#L9](./lua/avante/config.lua) for the full config_
   },
 }
 ```
+
 </details>
 
 ## Blink.cmp users
@@ -448,60 +448,26 @@ or you can use [Kaiser-Yang/blink-cmp-avante](https://github.com/Kaiser-Yang/bli
   <summary>Lua</summary>
 
 ```lua
-      file_selector = {
-        --- @alias FileSelectorProvider "native" | "fzf" | "mini.pick" | "snacks" | "telescope" | string | fun(params: avante.file_selector.IParams|nil): nil
+      selector = {
+        --- @alias avante.SelectorProvider "native" | "fzf_lua" | "mini_pick" | "snacks" | "telescope" | fun(selector: avante.ui.Selector): nil
         provider = "fzf",
         -- Options override for custom providers
         provider_opts = {},
       }
 ```
 
-To create a customized file_selector, you can specify a customized function to launch a picker to select items and pass the selected items to the `handler` callback.
+To create a customized selector provider, you can specify a customized function to launch a picker to select items and pass the selected items to the `on_select` callback.
 
 ```lua
-      file_selector = {
-        ---@param params avante.file_selector.IParams
-        provider = function(params)
-          local filepaths = params.filepaths ---@type string[]
-          local title = params.title ---@type string
-          local handler = params.handler ---@type fun(selected_filepaths: string[]|nil): nil
+      selector = {
+        ---@param selector avante.ui.Selector
+        provider = function(selector)
+          local items = selector.items ---@type avante.ui.SelectorItem[]
+          local title = selector.title ---@type string
+          local on_select = selector.on_select ---@type fun(selected_item_ids: string[]|nil): nil
 
-          -- Launch your customized picker with the items built from `filepaths`, then in the `on_confirm` callback,
-          -- pass the selected items (convert back to file paths) to the `handler` function.
-
-          local items = __your_items_formatter__(filepaths)
-          __your_picker__({
-            items = items,
-            on_cancel = function()
-              handler(nil)
-            end,
-            on_confirm = function(selected_items)
-              local selected_filepaths = {}
-              for _, item in ipairs(selected_items) do
-                table.insert(selected_filepaths, item.filepath)
-              end
-              handler(selected_filepaths)
-            end
-          })
+          --- your customized picker logic here
         end,
-        ---below is optional
-        provider_opts = {
-          ---@param params avante.file_selector.opts.IGetFilepathsParams
-          get_filepaths = function(params)
-            local cwd = params.cwd ---@type string
-            local selected_filepaths = params.selected_filepaths ---@type string[]
-            local cmd = string.format("fd --base-directory '%s' --hidden", vim.fn.fnameescape(cwd))
-            local output = vim.fn.system(cmd)
-            local filepaths = vim.split(output, "\n", { trimempty = true })
-            return vim
-              .iter(filepaths)
-              :filter(function(filepath)
-                return not vim.tbl_contains(selected_filepaths, filepath)
-              end)
-              :totable()
-          end
-        }
-        end
       }
 ```
 
@@ -622,6 +588,7 @@ The following key bindings are available for use with `avante.nvim`:
 | <kbd>Leader</kbd><kbd>a</kbd><kbd>?</kbd> | select model                                 |
 | <kbd>Leader</kbd><kbd>a</kbd><kbd>e</kbd> | edit selected blocks                         |
 | <kbd>Leader</kbd><kbd>a</kbd><kbd>S</kbd> | stop current AI request                      |
+| <kbd>Leader</kbd><kbd>a</kbd><kbd>h</kbd> | select between chat histories                |
 | <kbd>c</kbd><kbd>o</kbd>                  | choose ours                                  |
 | <kbd>c</kbd><kbd>t</kbd>                  | choose theirs                                |
 | <kbd>c</kbd><kbd>a</kbd>                  | choose all theirs                            |
@@ -641,6 +608,7 @@ The following key bindings are available for use with `avante.nvim`:
 ### Neotree shortcut
 
 In the neotree sidebar, you can also add a new keyboard shortcut to quickly add `file/folder` to `Avante Selected Files`.
+
 <details>
 <summary>Neotree configuration</summary>
 
@@ -685,6 +653,7 @@ return {
   },
 }
 ```
+
 </details>
 
 ## Commands
@@ -692,17 +661,20 @@ return {
 | Command                            | Description                                                                                                 | Examples                                            |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
 | `:AvanteAsk [question] [position]` | Ask AI about your code. Optional `position` set window position and `ask` enable/disable direct asking mode | `:AvanteAsk position=right Refactor this code here` |
-| `:AvanteBuild`                     | Build dependencies for the project                                                                          | |
-| `:AvanteChat`                      | Start a chat session with AI about your codebase. Default is `ask`=false                                    | |
-| `:AvanteClear`                     | Clear the chat history                                                                                      | |
-| `:AvanteEdit`                      | Edit the selected code blocks                                                                               | |
-| `:AvanteFocus`                     | Switch focus to/from the sidebar                                                                            | |
-| `:AvanteRefresh`                   | Refresh all Avante windows                                                                                  | |
-| `:AvanteStop`                      | Stop the current AI request                                                                                 | |
-| `:AvanteSwitchProvider`            | Switch AI provider (e.g. openai)                                                                            | |
-| `:AvanteShowRepoMap`               | Show repo map for project's structure                                                                       | |
-| `:AvanteToggle`                    | Toggle the Avante sidebar                                                                                   | |
-| `:AvanteModels`                    | Show model list                                                                                             | |
+| `:AvanteBuild`                     | Build dependencies for the project                                                                          |                                                     |
+| `:AvanteChat`                      | Start a chat session with AI about your codebase. Default is `ask`=false                                    |                                                     |
+| `:AvanteChatNew`                   | Start a new chat session. The current chat can be re-opened with the chat session selector                  |                                                     |
+| `:AvanteHistory`                   | Opens a picker for your previous chat sessions                                                              |                                                     |
+| `:AvanteClear`                     | Clear the chat history for your current chat session                                                        |                                                     |
+| `:AvanteEdit`                      | Edit the selected code blocks                                                                               |                                                     |
+| `:AvanteFocus`                     | Switch focus to/from the sidebar                                                                            |                                                     |
+| `:AvanteRefresh`                   | Refresh all Avante windows                                                                                  |                                                     |
+| `:AvanteStop`                      | Stop the current AI request                                                                                 |                                                     |
+| `:AvanteSwitchProvider`            | Switch AI provider (e.g. openai)                                                                            |                                                     |
+| `:AvanteShowRepoMap`               | Show repo map for project's structure                                                                       |                                                     |
+| `:AvanteToggle`                    | Toggle the Avante sidebar                                                                                   |                                                     |
+| `:AvanteModels`                    | Show model list                                                                                             |                                                     |
+| `:AvanteSwitchSelectorProvider`    | Switch avante selector provider (e.g. native, telescope, fzf_lua, mini_pick, snacks)                        |                                                     |
 
 ## Highlight Groups
 
@@ -720,6 +692,8 @@ return {
 | AvanteConflictIncomingLabel | Incoming conflict label highlight             | Default to shade of `AvanteConflictIncoming` |
 | AvantePopupHint             | Usage hints in popup menus                    |                                              |
 | AvanteInlineHint            | The end-of-line hint displayed in visual mode |                                              |
+| AvantePromptInput           | The body highlight of the prompt input        |                                              |
+| AvantePromptInputBorder     | The border highlight of the prompt input      | Default to `NormalFloat`                     |
 
 See [highlights.lua](./lua/avante/highlights.lua) for more information
 
@@ -808,12 +782,14 @@ Avante's tools include some web search engines, currently support:
 - Google's [Programmable Search Engine](https://developers.google.com/custom-search/v1/overview)
 - [Kagi](https://help.kagi.com/kagi/api/search.html)
 - [Brave Search](https://api-dashboard.search.brave.com/app/documentation/web-search/get-started)
+- [SearXNG](https://searxng.github.io/searxng/)
 
 The default is Tavily, and can be changed through configuring `Config.web_search_engine.provider`:
 
 ```lua
 web_search_engine = {
-  provider = "tavily", -- tavily, serpapi, searchapi, google or kagi
+  provider = "tavily", -- tavily, serpapi, searchapi, google, kagi, brave, or searxng
+  proxy = nil, -- proxy support, e.g., http://127.0.0.1:7890
 }
 ```
 
@@ -827,6 +803,7 @@ Environment variables required for providers:
   - `GOOGLE_SEARCH_ENGINE_ID` as the [search engine](https://programmablesearchengine.google.com) ID
 - Kagi: `KAGI_API_KEY` as the [API Token](https://kagi.com/settings?p=api)
 - Brave Search: `BRAVE_API_KEY` as the [API key](https://api-dashboard.search.brave.com/app/keys)
+- SearXNG: `SEARXNG_API_URL` as the [API URL](https://docs.searxng.org/dev/search_api.html)
 
 ## Disable Tools
 
@@ -906,6 +883,7 @@ Avante allows you to define custom tools that can be used by the AI during code 
   },
 }
 ```
+
 </details>
 
 ## MCP
@@ -926,7 +904,6 @@ Avante leverages [Claude Text Editor Tool](https://docs.anthropic.com/en/docs/bu
 
 > [!NOTE]
 > To enable **Claude Text Editor Tool Mode**, you must use the `claude-3-5-sonnet-*` or `claude-3-7-sonnet-*` model with the `claude` provider! This feature is not supported by any other models!
-
 
 ## Custom prompts
 

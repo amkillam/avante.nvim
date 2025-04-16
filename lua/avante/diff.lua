@@ -81,7 +81,7 @@ local CURRENT_HL = Highlights.CURRENT
 local INCOMING_HL = Highlights.INCOMING
 local CURRENT_LABEL_HL = Highlights.CURRENT_LABEL
 local INCOMING_LABEL_HL = Highlights.INCOMING_LABEL
-local PRIORITY = vim.highlight.priorities.user
+local PRIORITY = (vim.hl or vim.highlight).priorities.user
 local NAMESPACE = api.nvim_create_namespace("avante-conflict")
 local KEYBINDING_NAMESPACE = api.nvim_create_namespace("avante-conflict-keybinding")
 local AUGROUP_NAME = "avante_conflicts"
@@ -167,10 +167,10 @@ end
 ---Highlight each part of a git conflict i.e. the incoming changes vs the current/HEAD changes
 ---TODO: should extmarks be ephemeral? or is it less expensive to save them and only re-apply
 ---them when a buffer changes since otherwise we have to reparse the whole buffer constantly
+---@param bufnr integer
 ---@param positions table
 ---@param lines string[]
-local function highlight_conflicts(positions, lines)
-  local bufnr = api.nvim_get_current_buf()
+local function highlight_conflicts(bufnr, positions, lines)
   M.clear(bufnr)
 
   for _, position in ipairs(positions) do
@@ -326,7 +326,7 @@ local function parse_buffer(bufnr, range_start, range_end)
   update_visited_buffers(bufnr, positions)
   if has_conflict then
     register_cursor_move_events(bufnr)
-    highlight_conflicts(positions, lines)
+    highlight_conflicts(bufnr, positions, lines)
   else
     M.clear(bufnr)
   end
@@ -337,11 +337,11 @@ local function parse_buffer(bufnr, range_start, range_end)
 end
 
 ---Process a buffer if the changed tick has changed
----@param bufnr integer?
+---@param bufnr integer
 ---@param range_start integer?
 ---@param range_end integer?
 function M.process(bufnr, range_start, range_end)
-  bufnr = bufnr or api.nvim_get_current_buf()
+  bufnr = bufnr
   if visited_buffers[bufnr] and visited_buffers[bufnr].tick == vim.b[bufnr].changedtick then return end
   parse_buffer(bufnr, range_start, range_end)
 end
@@ -432,7 +432,6 @@ function M.setup()
   })
 
   api.nvim_set_decoration_provider(NAMESPACE, {
-    on_buf = function(_, bufnr, _) return Utils.is_valid_buf(bufnr) end,
     on_win = function(_, _, bufnr, _, _)
       if visited_buffers[bufnr] then M.process(bufnr) end
     end,

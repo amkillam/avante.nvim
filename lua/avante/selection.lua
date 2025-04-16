@@ -12,7 +12,7 @@ local fn = vim.fn
 
 local NAMESPACE = api.nvim_create_namespace("avante_selection")
 local SELECTED_CODE_NAMESPACE = api.nvim_create_namespace("avante_selected_code")
-local PRIORITY = vim.highlight.priorities.user
+local PRIORITY = (vim.hl or vim.highlight).priorities.user
 
 ---@class avante.Selection
 ---@field selection avante.SelectionResult | nil
@@ -141,7 +141,7 @@ function Selection:submit_input(input)
     for _, line in ipairs(response_lines_) do
       if line:match("^<code>") then
         in_code_block = true
-        line = line:gsub("^<code>", "")
+        line = line:gsub("^<code>", ""):gsub("</code>.*$", "")
         if line ~= "" then table.insert(response_lines, line) end
       elseif line:match("</code>") then
         in_code_block = false
@@ -292,28 +292,6 @@ function Selection:create_editing_input(request, line1, line2)
   self.prompt_input = prompt_input
 
   prompt_input:open()
-
-  api.nvim_create_autocmd("InsertEnter", {
-    group = self.augroup,
-    buffer = prompt_input.bufnr,
-    once = true,
-    desc = "Setup the completion of helpers in the input buffer",
-    callback = function()
-      local has_cmp, cmp = pcall(require, "cmp")
-      if has_cmp then
-        cmp.register_source(
-          "avante_mentions",
-          require("cmp_avante.mentions"):new(Utils.get_mentions(), prompt_input.bufnr)
-        )
-        cmp.setup.buffer({
-          enabled = true,
-          sources = {
-            { name = "avante_mentions" },
-          },
-        })
-      end
-    end,
-  })
 end
 
 function Selection:setup_autocmds()
@@ -333,10 +311,10 @@ function Selection:setup_autocmds()
     end,
   })
 
-  api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
+  api.nvim_create_autocmd({ "CursorMoved" }, {
     group = self.augroup,
     callback = function(ev)
-      if not Utils.is_sidebar_buffer(ev.buf) then
+      if vim.bo[ev.buf].buftype ~= "terminal" and not Utils.is_sidebar_buffer(ev.buf) then
         if Utils.in_visual_mode() then
           self:show_shortcuts_hints_popup()
         else

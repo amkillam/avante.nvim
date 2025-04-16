@@ -155,13 +155,6 @@ end
 ---@param opts AvanteGeneratePromptsOptions
 ---@return AvantePromptOptions
 function M.generate_prompts(opts)
-  if opts.prompt_opts then
-    local prompt_opts = vim.tbl_deep_extend("force", opts.prompt_opts, {
-      tool_histories = opts.tool_histories,
-    })
-    ---@cast prompt_opts AvantePromptOptions
-    return prompt_opts
-  end
   local provider = opts.provider or Providers[Config.provider]
   local mode = opts.mode or "planning"
   ---@type AvanteProviderFunctor | AvanteBedrockProviderFunctor
@@ -170,6 +163,9 @@ function M.generate_prompts(opts)
 
   -- Check if the instructions contains an image path
   local image_paths = {}
+  if opts.prompt_opts and opts.prompt_opts.image_paths then
+    image_paths = vim.list_extend(image_paths, opts.prompt_opts.image_paths)
+  end
   local instructions = opts.instructions
   if instructions and instructions:match("image: ") then
     local lines = vim.split(opts.instructions, "\n")
@@ -188,10 +184,26 @@ function M.generate_prompts(opts)
 
   local system_info = Utils.get_system_info()
 
+  local selected_files = opts.selected_files or {}
+
+  if opts.selected_filepaths then
+    for _, filepath in ipairs(opts.selected_filepaths) do
+      local lines, error = Utils.read_file_from_buf_or_disk(filepath)
+      lines = lines or {}
+      local filetype = Utils.get_filetype(filepath)
+      if error ~= nil then
+        Utils.error("error reading file: " .. error)
+      else
+        local content = table.concat(lines, "\n")
+        table.insert(selected_files, { path = filepath, content = content, file_type = filetype })
+      end
+    end
+  end
+
   local template_opts = {
     ask = opts.ask, -- TODO: add mode without ask instruction
     code_lang = opts.code_lang,
-    selected_files = opts.selected_files,
+    selected_files = selected_files,
     selected_code = opts.selected_code,
     recently_viewed_files = opts.recently_viewed_files,
     project_context = opts.project_context,
@@ -201,7 +213,12 @@ function M.generate_prompts(opts)
     memory = opts.memory,
   }
 
-  local system_prompt = Path.prompts.render_mode(mode, template_opts)
+  local system_prompt
+  if opts.prompt_opts and opts.prompt_opts.system_prompt then
+    system_prompt = opts.prompt_opts.system_prompt
+  else
+    system_prompt = Path.prompts.render_mode(mode, template_opts)
+  end
 
   if Config.system_prompt ~= nil then
     local custom_system_prompt = Config.system_prompt
@@ -213,6 +230,9 @@ function M.generate_prompts(opts)
 
   ---@type AvanteLLMMessage[]
   local messages = {}
+  if opts.prompt_opts and opts.prompt_opts.messages then
+    messages = vim.list_extend(messages, opts.prompt_opts.messages)
+  end
 
   if opts.project_context ~= nil and opts.project_context ~= "" and opts.project_context ~= "null" then
     local project_context = Path.prompts.render_file("_project.avanterules", template_opts)
@@ -224,7 +244,7 @@ function M.generate_prompts(opts)
     if diagnostics ~= "" then table.insert(messages, { role = "user", content = diagnostics }) end
   end
 
-  if (opts.selected_files and #opts.selected_files > 0 or false) or opts.selected_code ~= nil then
+  if #selected_files > 0 or opts.selected_code ~= nil then
     local code_context = Path.prompts.render_file("_context.avanterules", template_opts)
     if code_context ~= "" then table.insert(messages, { role = "user", content = code_context }) end
   end
@@ -243,6 +263,10 @@ function M.generate_prompts(opts)
   end
 
   local dropped_history_messages = {}
+  if opts.prompt_opts and opts.prompt_opts.dropped_history_messages then
+    dropped_history_messages = vim.list_extend(dropped_history_messages, opts.prompt_opts.dropped_history_messages)
+  end
+
   if opts.history_messages then
     if Config.history.max_tokens > 0 then remaining_tokens = math.min(Config.history.max_tokens, remaining_tokens) end
     -- Traverse the history in reverse, keeping only the latest history until the remaining tokens are exhausted and the first message role is "user"
@@ -290,13 +314,23 @@ Merge all changes from the <update> snippet into the <code> below.
   opts.session_ctx.system_prompt = system_prompt
   opts.session_ctx.messages = messages
 
+  local tools = {}
+  if opts.tools then tools = vim.list_extend(tools, opts.tools) end
+  if opts.prompt_opts and opts.prompt_opts.tools then tools = vim.list_extend(tools, opts.prompt_opts.tools) end
+
+  local tool_histories = {}
+  if opts.tool_histories then tool_histories = vim.list_extend(tool_histories, opts.tool_histories) end
+  if opts.prompt_opts and opts.prompt_opts.tool_histories then
+    tool_histories = vim.list_extend(tool_histories, opts.prompt_opts.tool_histories)
+  end
+
   ---@type AvantePromptOptions
   return {
     system_prompt = system_prompt,
     messages = messages,
     image_paths = image_paths,
-    tools = opts.tools,
-    tool_histories = opts.tool_histories,
+    tools = tools,
+    tool_histories = tool_histories,
     dropped_history_messages = dropped_history_messages,
   }
 end
@@ -551,6 +585,7 @@ function M._stream(opts)
 
   ---@type AvanteHandlerOptions
   local handler_opts = {
+    on_partial_tool_use = opts.on_partial_tool_use,
     on_start = opts.on_start,
     on_chunk = opts.on_chunk,
     on_stop = function(stop_opts)
@@ -745,9 +780,9 @@ function M.stream(opts)
   local is_completed = false
   if opts.on_tool_log ~= nil then
     local original_on_tool_log = opts.on_tool_log
-    opts.on_tool_log = vim.schedule_wrap(function(tool_name, log)
+    opts.on_tool_log = vim.schedule_wrap(function(...)
       if not original_on_tool_log then return end
-      return original_on_tool_log(tool_name, log)
+      return original_on_tool_log(...)
     end)
   end
   if opts.on_chunk ~= nil then
@@ -765,6 +800,13 @@ function M.stream(opts)
         is_completed = true
       end
       return original_on_stop(stop_opts)
+    end)
+  end
+  if opts.on_partial_tool_use ~= nil then
+    local original_on_partial_tool_use = opts.on_partial_tool_use
+    opts.on_partial_tool_use = vim.schedule_wrap(function(tool_use)
+      if is_completed then return end
+      return original_on_partial_tool_use(tool_use)
     end)
   end
 

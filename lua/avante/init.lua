@@ -232,6 +232,34 @@ function H.autocmds()
     end,
   })
 
+  api.nvim_create_autocmd("QuitPre", {
+    group = H.augroup,
+    callback = function()
+      local current_buf = vim.api.nvim_get_current_buf()
+      if Utils.is_sidebar_buffer(current_buf) then return end
+
+      local non_sidebar_wins = 0
+      local sidebar_wins = {}
+      for _, win in ipairs(vim.api.nvim_list_wins()) do
+        if vim.api.nvim_win_is_valid(win) then
+          local win_buf = vim.api.nvim_win_get_buf(win)
+          if Utils.is_sidebar_buffer(win_buf) then
+            table.insert(sidebar_wins, win)
+          else
+            non_sidebar_wins = non_sidebar_wins + 1
+          end
+        end
+      end
+
+      if non_sidebar_wins <= 1 then
+        for _, win in ipairs(sidebar_wins) do
+          pcall(vim.api.nvim_win_close, win, false)
+        end
+      end
+    end,
+    nested = true,
+  })
+
   api.nvim_create_autocmd("TabClosed", {
     group = H.augroup,
     pattern = "*",
@@ -447,6 +475,59 @@ function M.setup(opts)
   end
 
   if Config.rag_service.enabled then run_rag_service() end
+
+  local has_cmp, cmp = pcall(require, "cmp")
+  if has_cmp then
+    cmp.register_source("avante_commands", require("cmp_avante.commands"):new())
+
+    cmp.register_source(
+      "avante_mentions",
+      require("cmp_avante.mentions"):new(function()
+        local mentions = Utils.get_mentions()
+
+        table.insert(mentions, {
+          description = "file",
+          command = "file",
+          details = "add files...",
+          callback = function(sidebar) sidebar.file_selector:open() end,
+        })
+
+        table.insert(mentions, {
+          description = "quickfix",
+          command = "quickfix",
+          details = "add files in quickfix list to chat context",
+          callback = function(sidebar) sidebar.file_selector:add_quickfix_files() end,
+        })
+
+        table.insert(mentions, {
+          description = "buffers",
+          command = "buffers",
+          details = "add open buffers to the chat context",
+          callback = function(sidebar) sidebar.file_selector:add_buffer_files() end,
+        })
+
+        return mentions
+      end)
+    )
+
+    cmp.register_source("avante_prompt_mentions", require("cmp_avante.mentions"):new(Utils.get_mentions))
+
+    cmp.setup.filetype({ "AvanteInput" }, {
+      enabled = true,
+      sources = {
+        { name = "avante_commands" },
+        { name = "avante_mentions" },
+        { name = "avante_files" },
+      },
+    })
+
+    cmp.setup.filetype({ "AvantePromptInput" }, {
+      enabled = true,
+      sources = {
+        { name = "avante_prompt_mentions" },
+      },
+    })
+  end
 end
 
 return M

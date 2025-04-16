@@ -304,6 +304,32 @@ function M.is_valid_buf(bufnr)
   return #vim.bo[bufnr].buftype == 0 and vim.bo[bufnr].modifiable
 end
 
+--- Check if a NUI container is valid:
+--- 1. Container must exist
+--- 2. Container must have a valid buffer number
+--- 3. Container must have a valid window ID (optional, based on check_winid parameter)
+--- Always returns a boolean value
+---@param container NuiSplit | nil
+---@param check_winid boolean? Whether to check window validity, defaults to false
+---@return boolean
+function M.is_valid_container(container, check_winid)
+  -- Default check_winid to false if not specified
+  if check_winid == nil then check_winid = false end
+
+  -- First check if container exists
+  if container == nil then return false end
+
+  -- Check buffer validity
+  if container.bufnr == nil or not api.nvim_buf_is_valid(container.bufnr) then return false end
+
+  -- Check window validity if requested
+  if check_winid then
+    if container.winid == nil or not api.nvim_win_is_valid(container.winid) then return false end
+  end
+
+  return true
+end
+
 ---@param name string?
 ---@return table
 function M.get_hl(name)
@@ -1218,6 +1244,70 @@ function M.llm_tool_param_fields_to_json_schema(fields)
     if not field.optional then table.insert(required, field.name) end
   end
   return properties, required
+end
+
+---@return AvanteSlashCommand[]
+function M.get_commands()
+  local Config = require("avante.config")
+
+  ---@param items_ {name: string, description: string, shorthelp?: string}[]
+  ---@return string
+  local function get_help_text(items_)
+    local help_text = ""
+    for _, item in ipairs(items_) do
+      help_text = help_text .. "- " .. item.name .. ": " .. (item.shorthelp or item.description) .. "\n"
+    end
+    return help_text
+  end
+
+  local builtin_items = {
+    { description = "Show help message", name = "help" },
+    { description = "Clear chat history", name = "clear" },
+    { description = "Reset memory", name = "reset" },
+    { description = "New chat", name = "new" },
+    {
+      shorthelp = "Ask a question about specific lines",
+      description = "/lines <start>-<end> <question>",
+      name = "lines",
+    },
+    { description = "Commit the changes", name = "commit" },
+  }
+
+  ---@type {[AvanteSlashCommandBuiltInName]: AvanteSlashCommandCallback}
+  local builtin_cbs = {
+    help = function(sidebar, args, cb)
+      local help_text = get_help_text(builtin_items)
+      sidebar:update_content(help_text, { focus = false, scroll = false })
+      if cb then cb(args) end
+    end,
+    clear = function(sidebar, args, cb) sidebar:clear_history(args, cb) end,
+    reset = function(sidebar, args, cb) sidebar:reset_memory(args, cb) end,
+    new = function(sidebar, args, cb) sidebar:new_chat(args, cb) end,
+    lines = function(_, args, cb)
+      if cb then cb(args) end
+    end,
+    commit = function(_, _, cb)
+      local question = "Please commit the changes"
+      if cb then cb(question) end
+    end,
+  }
+
+  local builtin_commands = vim
+    .iter(builtin_items)
+    :map(
+      ---@param item AvanteSlashCommand
+      function(item)
+        return {
+          name = item.name,
+          description = item.description,
+          callback = builtin_cbs[item.name],
+          details = item.shorthelp and table.concat({ item.shorthelp, item.description }, "\n") or item.description,
+        }
+      end
+    )
+    :totable()
+
+  return vim.list_extend(builtin_commands, Config.slash_commands)
 end
 
 return M
