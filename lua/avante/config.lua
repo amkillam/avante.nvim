@@ -291,6 +291,7 @@ M._defaults = {
     options = {
       temperature = 0,
       num_ctx = 20480,
+      keep_alive = "5m",
     },
   },
   ---@type AvanteSupportedProvider
