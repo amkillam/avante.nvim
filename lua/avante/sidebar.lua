@@ -221,6 +221,7 @@ function Sidebar:close(opts)
   for _, comp in pairs(self) do
     if comp and type(comp) == "table" and comp.unmount then comp:unmount() end
   end
+  self.old_result_lines = {}
   if opts.goto_code_win and self.code and self.code.winid and api.nvim_win_is_valid(self.code.winid) then
     fn.win_gotoid(self.code.winid)
   end
@@ -694,6 +695,11 @@ local function insert_conflict_contents(bufnr, snippets)
   for _, snippet in ipairs(snippets) do
     local start_line, end_line = unpack(snippet.range)
 
+    local first_line_content = lines[start_line]
+    local old_first_line_indentation = ""
+
+    if first_line_content then old_first_line_indentation = Utils.get_indentation(first_line_content) end
+
     local result = {}
     table.insert(result, "<<<<<<< HEAD")
     for i = start_line, end_line do
@@ -702,6 +708,14 @@ local function insert_conflict_contents(bufnr, snippets)
     table.insert(result, "=======")
 
     local snippet_lines = vim.split(snippet.content, "\n")
+
+    if #snippet_lines > 0 then
+      local new_first_line_indentation = Utils.get_indentation(snippet_lines[1])
+      if #old_first_line_indentation > #new_first_line_indentation then
+        local line_indentation = old_first_line_indentation:sub(#new_first_line_indentation + 1)
+        snippet_lines = vim.iter(snippet_lines):map(function(line) return line_indentation .. line end):totable()
+      end
+    end
 
     vim.list_extend(result, snippet_lines)
 
@@ -906,7 +920,7 @@ function Sidebar:apply(current_cursor)
     api.nvim_set_current_win(self.code.winid)
     for filepath, snippets in pairs(selected_snippets_map) do
       if Config.behaviour.minimize_diff then snippets = self:minimize_snippets(filepath, snippets) end
-      local bufnr = Utils.get_or_create_buffer_with_filepath(filepath)
+      local bufnr = Utils.open_buffer(filepath)
       local path_ = PPath:new(Utils.is_win() and filepath:gsub("/", "\\") or filepath)
       path_:parent():mkdir({ parents = true, exists_ok = true })
       insert_conflict_contents(bufnr, snippets)
@@ -964,7 +978,7 @@ local base_win_options = {
     .. ",Normal:"
     .. Highlights.AVANTE_SIDEBAR_NORMAL,
   winbar = "",
-  statusline = "",
+  statusline = " ",
 }
 
 function Sidebar:render_header(winid, bufnr, header_text, hl, reverse_hl)
@@ -1474,7 +1488,7 @@ function Sidebar:initialize()
 
   local buf_path = api.nvim_buf_get_name(self.code.bufnr)
   -- if the filepath is outside of the current working directory then we want the absolute path
-  local filepath = Utils.file.is_in_cwd(buf_path) and Utils.relative_path(buf_path) or buf_path
+  local filepath = Utils.file.is_in_project(buf_path) and Utils.relative_path(buf_path) or buf_path
   Utils.debug("Sidebar:initialize adding buffer to file selector", buf_path)
 
   self.file_selector:reset()
@@ -1836,7 +1850,15 @@ function Sidebar:render_state()
   if self.current_state == "succeeded" then hl = "AvanteStateSpinnerSucceeded" end
   if self.current_state == "searching" then hl = "AvanteStateSpinnerSearching" end
   if self.current_state == "thinking" then hl = "AvanteStateSpinnerThinking" end
-  if self.current_state ~= "generating" and self.current_state ~= "tool calling" then spinner_char = "" end
+  if self.current_state == "compacting" then hl = "AvanteStateSpinnerCompacting" end
+  if
+    self.current_state ~= "generating"
+    and self.current_state ~= "tool calling"
+    and self.current_state ~= "thinking"
+    and self.current_state ~= "compacting"
+  then
+    spinner_char = ""
+  end
   local virt_line
   if spinner_char == "" then
     virt_line = " " .. self.current_state .. " "
@@ -1857,6 +1879,27 @@ function Sidebar:render_state()
     hl_mode = "combine",
   })
   self.state_timer = vim.defer_fn(function() self:render_state() end, 160)
+end
+
+function Sidebar:compact_history_messages(args, cb)
+  local history_memory = self.chat_history.memory
+  local messages = Utils.get_history_messages(self.chat_history)
+  self.current_state = "compacting"
+  self:render_state()
+  self:update_content(
+    "compacting history messsages",
+    { focus = false, scroll = true, callback = function() self:focus_input() end }
+  )
+  Llm.summarize_memory(history_memory and history_memory.content, messages, function(memory)
+    if memory then
+      self.chat_history.memory = memory
+      Path.history.save(self.code.bufnr, self.chat_history)
+    end
+    self:update_content("compacted!", { focus = false, scroll = true, callback = function() self:focus_input() end })
+    self.current_state = "compacted"
+    self:clear_state()
+    if cb then cb(args) end
+  end)
 end
 
 function Sidebar:new_chat(args, cb)
@@ -1892,10 +1935,19 @@ function Sidebar:add_history_messages(messages)
   end
   self.chat_history.messages = history_messages
   Path.history.save(self.code.bufnr, self.chat_history)
-  if self.chat_history.title == "untitled" and #messages > 0 then
+  if
+    self.chat_history.title == "untitled"
+    and #messages > 0
+    and messages[1].just_for_display ~= true
+    and messages[1].state == "generated"
+  then
+    self.chat_history.title = "generating..."
     Llm.summarize_chat_thread_title(messages[1].message.content, function(title)
-      self:reload_chat_history()
-      if title then self.chat_history.title = title end
+      if title then
+        self.chat_history.title = title
+      else
+        self.chat_history.title = "untitled"
+      end
       Path.history.save(self.code.bufnr, self.chat_history)
     end)
   end
@@ -1964,9 +2016,7 @@ function Sidebar:create_selected_code_container()
         winid = self.input_container.winid,
       },
       buf_options = buf_options,
-      win_options = {
-        winhighlight = base_win_options.winhighlight,
-      },
+      win_options = vim.tbl_deep_extend("force", base_win_options, {}),
       size = {
         height = selected_code_size + 3,
       },
@@ -2131,9 +2181,9 @@ function Sidebar:get_generate_prompts_options(request, cb)
   local diagnostics = nil
   if mentions.enable_diagnostics then
     if self.code ~= nil and self.code.bufnr ~= nil and self.code.selection ~= nil then
-      diagnostics = Utils.get_current_selection_diagnostics(self.code.bufnr, self.code.selection)
+      diagnostics = Utils.lsp.get_current_selection_diagnostics(self.code.bufnr, self.code.selection)
     else
-      diagnostics = Utils.get_diagnostics(self.code.bufnr)
+      diagnostics = Utils.lsp.get_diagnostics(self.code.bufnr)
     end
   end
 
@@ -2172,9 +2222,12 @@ function Sidebar:get_generate_prompts_options(request, cb)
 
   local selected_filepaths = self.file_selector.selected_filepaths or {}
 
+  local ask = self.ask_opts.ask
+  if ask == nil then ask = true end
+
   ---@type AvanteGeneratePromptsOptions
   local prompts_opts = {
-    ask = self.ask_opts.ask or true,
+    ask = ask,
     project_context = vim.json.encode(project_context),
     selected_filepaths = selected_filepaths,
     recently_viewed_files = Utils.get_recent_filepaths(),
@@ -2182,6 +2235,7 @@ function Sidebar:get_generate_prompts_options(request, cb)
     history_messages = history_messages,
     code_lang = filetype,
     selected_code = selected_code,
+    disable_compact_history_messages = true,
     -- instructions = request,
     tools = tools,
   }
@@ -2311,22 +2365,23 @@ function Sidebar:create_input_container()
     ---@param state AvanteLLMToolUseState
     local function on_tool_log(tool_id, tool_name, log, state)
       if state == "generating" then on_state_change("tool calling") end
-      local tool_message = vim.iter(self.chat_history.messages):find(function(message)
-        if message.message.role ~= "assistant" then return false end
+      local tool_use_message = nil
+      for idx = #self.chat_history.messages, 1, -1 do
+        local message = self.chat_history.messages[idx]
         local content = message.message.content
-        if type(content) ~= "table" then return false end
-        if content[1].type ~= "tool_use" then return false end
-        if content[1].id ~= tool_id then return false end
-        return true
-      end)
-      if not tool_message then
-        Utils.debug("tool_message not found", tool_id, tool_name)
+        if type(content) == "table" and content[1].type == "tool_use" and content[1].id == tool_id then
+          tool_use_message = message
+          break
+        end
+      end
+      if not tool_use_message then
+        Utils.debug("tool_use message not found", tool_id, tool_name)
         return
       end
-      local tool_use_logs = tool_message.tool_use_logs or {}
+      local tool_use_logs = tool_use_message.tool_use_logs or {}
       local content = string.format("[%s]: %s", tool_name, log)
       table.insert(tool_use_logs, content)
-      tool_message.tool_use_logs = tool_use_logs
+      tool_use_message.tool_use_logs = tool_use_logs
       save_history()
       self:update_content("")
     end
@@ -2370,14 +2425,7 @@ function Sidebar:create_input_container()
         if Config.behaviour.auto_apply_diff_after_generation then self:apply(false) end
       end, 0)
 
-      if self.chat_history.title == "untitled" then
-        Llm.summarize_chat_thread_title(request, function(title)
-          if title then self.chat_history.title = title end
-          Path.history.save(self.code.bufnr, self.chat_history)
-        end)
-      else
-        Path.history.save(self.code.bufnr, self.chat_history)
-      end
+      Path.history.save(self.code.bufnr, self.chat_history)
     end
 
     if request and request ~= "" then
@@ -2406,18 +2454,22 @@ function Sidebar:create_input_container()
         session_ctx = {},
       })
 
-      ---@param dropped_history_messages avante.HistoryMessage[]
-      local function on_memory_summarize(dropped_history_messages)
+      ---@param pending_compaction_history_messages avante.HistoryMessage[]
+      local function on_memory_summarize(pending_compaction_history_messages)
         local history_memory = self.chat_history.memory
-        Llm.summarize_memory(history_memory and history_memory.content, dropped_history_messages, function(memory)
-          if memory then
-            self.chat_history.memory = memory
-            Path.history.save(self.code.bufnr, self.chat_history)
-            stream_options.memory = memory.content
+        Llm.summarize_memory(
+          history_memory and history_memory.content,
+          pending_compaction_history_messages,
+          function(memory)
+            if memory then
+              self.chat_history.memory = memory
+              Path.history.save(self.code.bufnr, self.chat_history)
+              stream_options.memory = memory.content
+            end
+            stream_options.history_messages = self:get_history_messages_for_api()
+            Llm.stream(stream_options)
           end
-          stream_options.history_messages = self:get_history_messages_for_api()
-          Llm.stream(stream_options)
-        end)
+        )
       end
 
       stream_options.on_memory_summarize = on_memory_summarize
@@ -2763,7 +2815,6 @@ function Sidebar:create_selected_files_container()
       filetype = "AvanteSelectedFiles",
     }),
     win_options = vim.tbl_deep_extend("force", base_win_options, {
-      wrap = Config.windows.wrap,
       fillchars = Config.windows.fillchars,
     }),
     position = "top",
@@ -2779,15 +2830,17 @@ function Sidebar:create_selected_files_container()
     local selected_filepaths_ = self.file_selector:get_selected_filepaths()
 
     if #selected_filepaths_ == 0 then
-      if self.selected_files_container and api.nvim_win_is_valid(self.selected_files_container.winid) then
+      if Utils.is_valid_container(self.selected_files_container) then
         self.selected_files_container:unmount()
+        self:refresh_winids()
       end
       return
     end
 
-    if not self.selected_files_container or not api.nvim_win_is_valid(self.selected_files_container.winid) then
+    if not Utils.is_valid_container(self.selected_files_container, true) then
       self:create_selected_files_container()
-      if not self.selected_files_container or not api.nvim_win_is_valid(self.selected_files_container.winid) then
+      self:refresh_winids()
+      if not Utils.is_valid_container(self.selected_files_container, true) then
         Utils.warn("Failed to create or find selected files container window.")
         return
       end

@@ -580,9 +580,8 @@ function M.remove_indentation(code)
 end
 
 function M.relative_path(absolute)
-  local relative = fn.fnamemodify(absolute, ":.")
-  if string.sub(relative, 0, 1) == "/" then return fn.fnamemodify(absolute, ":t") end
-  return relative
+  local project_root = M.get_project_root()
+  return M.make_relative_path(absolute, project_root)
 end
 
 function M.get_doc()
@@ -728,12 +727,16 @@ function M.parse_gitignore(gitignore_path)
   return ignore_patterns, negate_patterns
 end
 
+-- @param file string
+-- @param ignore_patterns string[]
+-- @param negate_patterns string[]
+-- @return boolean
 function M.is_ignored(file, ignore_patterns, negate_patterns)
   for _, pattern in ipairs(negate_patterns) do
     if file:match(pattern) then return false end
   end
   for _, pattern in ipairs(ignore_patterns) do
-    if file:match(pattern) then return true end
+    if file:match(pattern .. "/") or file:match(pattern .. "$") then return true end
   end
   return false
 end
@@ -884,7 +887,7 @@ function M.join_paths(...)
     result = result .. path
     ::continue::
   end
-  return result
+  return M.norm(result)
 end
 
 function M.path_exists(path) return vim.loop.fs_stat(path) ~= nil end
@@ -910,9 +913,6 @@ function M.extract_mentions(content)
   }
 end
 
----@alias AvanteMentions "codebase" | "diagnostics"
----@alias AvanteMentionCallback fun(args: string, cb?: fun(args: string): nil): nil
----@alias AvanteMention {description: string, command: AvanteMentions, details: string, shorthelp?: string, callback?: AvanteMentionCallback}
 ---@return AvanteMention[]
 function M.get_mentions()
   return {
@@ -929,41 +929,50 @@ function M.get_mentions()
   }
 end
 
----@param filepath string
----@return integer|nil bufnr
-local function get_opened_buffer_by_filepath(filepath)
-  local project_root = M.get_project_root()
-  local absolute_path = M.join_paths(project_root, filepath)
-  for _, buf in ipairs(api.nvim_list_bufs()) do
-    if M.join_paths(project_root, fn.bufname(buf)) == absolute_path then return buf end
-  end
-  return nil
+---@return AvanteMention[]
+function M.get_chat_mentions()
+  local mentions = M.get_mentions()
+
+  table.insert(mentions, {
+    description = "file",
+    command = "file",
+    details = "add files...",
+    callback = function(sidebar) sidebar.file_selector:open() end,
+  })
+
+  table.insert(mentions, {
+    description = "quickfix",
+    command = "quickfix",
+    details = "add files in quickfix list to chat context",
+    callback = function(sidebar) sidebar.file_selector:add_quickfix_files() end,
+  })
+
+  table.insert(mentions, {
+    description = "buffers",
+    command = "buffers",
+    details = "add open buffers to the chat context",
+    callback = function(sidebar) sidebar.file_selector:add_buffer_files() end,
+  })
+
+  return mentions
 end
 
----@param filepath string
+---@param path string
+---@param set_current_buf? boolean
 ---@return integer bufnr
-function M.get_or_create_buffer_with_filepath(filepath)
-  -- Check if a buffer with this filepath already exists
-  local existing_buf = get_opened_buffer_by_filepath(filepath)
-  if existing_buf then
-    -- goto this buffer
-    api.nvim_set_current_buf(existing_buf)
-    return existing_buf
-  end
+function M.open_buffer(path, set_current_buf)
+  if set_current_buf == nil then set_current_buf = true end
 
-  -- Create a new buffer without setting its name
-  local buf = api.nvim_create_buf(true, false)
+  local abs_path = M.join_paths(M.get_project_root(), path)
 
-  -- Set the buffer options
-  api.nvim_set_option_value("buftype", "", { buf = buf })
+  local bufnr = vim.fn.bufnr(abs_path, true)
+  vim.fn.bufload(bufnr)
 
-  -- Set the current buffer to the new buffer
-  api.nvim_set_current_buf(buf)
+  if set_current_buf then vim.api.nvim_set_current_buf(bufnr) end
 
-  -- Use the edit command to load the file content and set the buffer name
-  vim.cmd("edit " .. fn.fnameescape(filepath))
+  vim.cmd("filetype detect")
 
-  return buf
+  return bufnr
 end
 
 ---@param old_lines avante.ui.Line[]
@@ -1056,64 +1065,9 @@ function M.update_buffer_lines(ns_id, bufnr, old_lines, new_lines)
   end
 end
 
-local severity = {
-  [1] = "ERROR",
-  [2] = "WARNING",
-  [3] = "INFORMATION",
-  [4] = "HINT",
-}
-
----@class AvanteDiagnostic
----@field content string
----@field start_line number
----@field end_line number
----@field severity string
----@field source string
-
----@param bufnr integer
----@return AvanteDiagnostic[]
-function M.get_diagnostics(bufnr)
-  if bufnr == nil then bufnr = api.nvim_get_current_buf() end
-  local diagnositcs = ---@type vim.Diagnostic[]
-    vim.diagnostic.get(bufnr, {
-      severity = {
-        vim.diagnostic.severity.ERROR,
-        vim.diagnostic.severity.WARN,
-        vim.diagnostic.severity.INFO,
-        vim.diagnostic.severity.HINT,
-      },
-    })
-  return vim
-    .iter(diagnositcs)
-    :map(function(diagnostic)
-      local d = {
-        content = diagnostic.message,
-        start_line = diagnostic.lnum + 1,
-        end_line = diagnostic.end_lnum and diagnostic.end_lnum + 1 or diagnostic.lnum + 1,
-        severity = severity[diagnostic.severity],
-        source = diagnostic.source,
-      }
-      return d
-    end)
-    :totable()
-end
-
----@param bufnr integer
----@param selection avante.SelectionResult
-function M.get_current_selection_diagnostics(bufnr, selection)
-  local diagnostics = M.get_diagnostics(bufnr)
-  local selection_diagnostics = {}
-  for _, diagnostic in ipairs(diagnostics) do
-    if selection.range.start.lnum <= diagnostic.start_line and selection.range.finish.lnum >= diagnostic.end_line then
-      table.insert(selection_diagnostics, diagnostic)
-    end
-  end
-  return selection_diagnostics
-end
-
 function M.uniform_path(path)
   if type(path) ~= "string" then path = tostring(path) end
-  if not M.file.is_in_cwd(path) then return path end
+  if not M.file.is_in_project(path) then return path end
   local project_root = M.get_project_root()
   local abs_path = M.is_absolute_path(path) and path or M.join_paths(project_root, path)
   local relative_path = M.make_relative_path(abs_path, project_root)
@@ -1140,8 +1094,9 @@ end
 ---@return string[]|nil lines
 ---@return string|nil error
 function M.read_file_from_buf_or_disk(filepath)
+  local abs_path = M.join_paths(M.get_project_root(), filepath)
   --- Lookup if the file is loaded in a buffer
-  local bufnr = vim.fn.bufnr(filepath)
+  local bufnr = vim.fn.bufnr(abs_path)
   if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
     -- If buffer exists and is loaded, get buffer content
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
@@ -1149,7 +1104,7 @@ function M.read_file_from_buf_or_disk(filepath)
   end
 
   -- Fallback: read file from disk
-  local file, open_err = io.open(filepath, "r")
+  local file, open_err = io.open(abs_path, "r")
   if file then
     local content = file:read("*all")
     file:close()
@@ -1312,6 +1267,7 @@ function M.get_commands()
     { description = "Show help message", name = "help" },
     { description = "Clear chat history", name = "clear" },
     { description = "New chat", name = "new" },
+    { description = "Compact history messages to save tokens", name = "compact" },
     {
       shorthelp = "Ask a question about specific lines",
       description = "/lines <start>-<end> <question>",
@@ -1329,6 +1285,7 @@ function M.get_commands()
     end,
     clear = function(sidebar, args, cb) sidebar:clear_history(args, cb) end,
     new = function(sidebar, args, cb) sidebar:new_chat(args, cb) end,
+    compact = function(sidebar, args, cb) sidebar:compact_history_messages(args, cb) end,
     lines = function(_, args, cb)
       if cb then cb(args) end
     end,
@@ -1414,6 +1371,66 @@ function M.uuid()
 end
 
 ---@param message avante.HistoryMessage
+---@return boolean
+function M.is_tool_use_message(message)
+  local content = message.message.content
+  if type(content) == "string" then return false end
+  if vim.islist(content) then
+    for _, item in ipairs(content) do
+      if item.type == "tool_use" then return true end
+    end
+  end
+  return false
+end
+
+---@param message avante.HistoryMessage
+---@return boolean
+function M.is_tool_result_message(message)
+  local content = message.message.content
+  if type(content) == "string" then return false end
+  if vim.islist(content) then
+    for _, item in ipairs(content) do
+      if item.type == "tool_result" then return true end
+    end
+  end
+  return false
+end
+
+---@param message avante.HistoryMessage
+---@param messages avante.HistoryMessage[]
+---@return avante.HistoryMessage | nil
+function M.get_tool_use_message(message, messages)
+  local content = message.message.content
+  if type(content) == "string" then return nil end
+  if vim.islist(content) then
+    local tool_id = nil
+    for _, item in ipairs(content) do
+      if item.type == "tool_result" then
+        tool_id = item.tool_use_id
+        break
+      end
+    end
+    if not tool_id then return nil end
+    local idx = nil
+    for idx_, message_ in ipairs(messages) do
+      if message_.uuid == message.uuid then
+        idx = idx_
+        break
+      end
+    end
+    if not idx then return nil end
+    for idx_ = idx - 1, 1, -1 do
+      local message_ = messages[idx_]
+      local content_ = message_.message.content
+      if type(content_) == "table" and content_[1].type == "tool_use" and content_[1].id == tool_id then
+        return message_
+      end
+    end
+  end
+  return nil
+end
+
+---@param message avante.HistoryMessage
 ---@param messages avante.HistoryMessage[]
 ---@return avante.HistoryMessage | nil
 function M.get_tool_result_message(message, messages)
@@ -1428,7 +1445,15 @@ function M.get_tool_result_message(message, messages)
       end
     end
     if not tool_id then return nil end
-    for _, message_ in ipairs(messages) do
+    local idx = nil
+    for idx_, message_ in ipairs(messages) do
+      if message_.uuid == message.uuid then
+        idx = idx_
+        break
+      end
+    end
+    if not idx then return nil end
+    for _, message_ in ipairs(vim.list_slice(messages, idx + 1, #messages)) do
       local content_ = message_.message.content
       if type(content_) == "table" and content_[1].type == "tool_result" and content_[1].tool_use_id == tool_id then
         return message_
@@ -1469,36 +1494,48 @@ function M.message_content_item_to_lines(item, message, messages)
       local lines = {}
       local state = "generating"
       local hl = "AvanteStateSpinnerToolCalling"
-      if message.state == "generated" then
-        local tool_result_message = M.get_tool_result_message(message, messages)
-        if tool_result_message then
-          local tool_result = tool_result_message.message.content[1]
-          if tool_result.is_error then
-            state = "failed"
-            hl = "AvanteStateSpinnerFailed"
-          else
-            state = "succeeded"
-            hl = "AvanteStateSpinnerSucceeded"
-          end
+      local tool_result_message = M.get_tool_result_message(message, messages)
+      if tool_result_message then
+        local tool_result = tool_result_message.message.content[1]
+        if tool_result.is_error then
+          state = "failed"
+          hl = "AvanteStateSpinnerFailed"
+        else
+          state = "succeeded"
+          hl = "AvanteStateSpinnerSucceeded"
         end
       end
       table.insert(
         lines,
         Line:new({ { "╭─" }, { " " }, { string.format(" %s ", item.name), hl }, { string.format(" %s", state) } })
       )
-      for idx, log in ipairs(message.tool_use_logs or {}) do
-        local log_ = M.trim(log, { prefix = string.format("[%s]: ", item.name) })
-        local lines_ = vim.split(log_, "\n")
-        if idx ~= #(message.tool_use_logs or {}) then
-          for _, line_ in ipairs(lines_) do
-            table.insert(lines, Line:new({ { "│" }, { string.format("   %s", line_) } }))
-          end
-        else
-          for idx_, line_ in ipairs(lines_) do
-            if idx_ ~= #lines_ then
+      if message.tool_use_logs then
+        for idx, log in ipairs(message.tool_use_logs) do
+          local log_ = M.trim(log, { prefix = string.format("[%s]: ", item.name) })
+          local lines_ = vim.split(log_, "\n")
+          if idx ~= #(message.tool_use_logs or {}) then
+            for _, line_ in ipairs(lines_) do
               table.insert(lines, Line:new({ { "│" }, { string.format("   %s", line_) } }))
+            end
+          else
+            for idx_, line_ in ipairs(lines_) do
+              if idx_ ~= #lines_ then
+                table.insert(lines, Line:new({ { "│" }, { string.format("   %s", line_) } }))
+              else
+                table.insert(lines, Line:new({ { "╰─" }, { string.format("  %s", line_) } }))
+              end
+            end
+          end
+        end
+      elseif tool_result_message then
+        local tool_result = tool_result_message.message.content[1]
+        if tool_result.content then
+          local result_lines = vim.split(tool_result.content, "\n")
+          for idx, line in ipairs(result_lines) do
+            if idx ~= #result_lines then
+              table.insert(lines, Line:new({ { "│" }, { string.format("   %s", line) } }))
             else
-              table.insert(lines, Line:new({ { "╰─" }, { string.format("  %s", line_) } }))
+              table.insert(lines, Line:new({ { "╰─" }, { string.format("  %s", line) } }))
             end
           end
         end
