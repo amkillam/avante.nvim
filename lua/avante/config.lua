@@ -261,6 +261,8 @@ M._defaults = {
     timeout = 30000, -- Timeout in milliseconds
     temperature = 0,
     max_tokens = 20480,
+    aws_region = "", -- AWS region to use for authentication and bedrock API
+    aws_profile = "", -- AWS profile to use for authentication, if unspecified uses default credentials chain
   },
   ---@type AvanteSupportedProvider
   gemini = {
@@ -645,6 +647,8 @@ M.BASE_PROVIDER_KEYS = {
   "api_key_name",
   "timeout",
   "display_name",
+  "aws_region",
+  "aws_profile",
   -- internal
   "local",
   "_shellenv",
