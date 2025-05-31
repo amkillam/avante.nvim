@@ -1,6 +1,6 @@
 local Base = require("avante.llm_tools.base")
 local Config = require("avante.config")
--- local HistoryMessage = require("avante.history_message")
+local HistoryMessage = require("avante.history_message")
 
 ---@alias AttemptCompletionInput {result: string, command?: string}
 
@@ -32,6 +32,10 @@ M.param = {
       optional = true,
     },
   },
+  usage = {
+    result = "The result of the task. Formulate this result in a way that is final and does not require further input from the user. Don't end your result with questions or offers for further assistance.",
+    command = "A CLI command to execute to show a live demo of the result to the user. For example, use `open index.html` to display a created html website, or `open localhost:3000` to display a locally running development server. But DO NOT use commands like `echo` or `cat` that merely print text. This command should be valid for the current operating system. Ensure the command is properly formatted and does not contain any harmful instructions.",
+  },
 }
 
 ---@type AvanteLLMToolReturn[]
@@ -58,14 +62,14 @@ function M.func(opts, on_log, on_complete, session_ctx)
   local sidebar = require("avante").get()
   if not sidebar then return false, "Avante sidebar not found" end
   session_ctx.attempt_completion_is_called = true
-  -- local message = HistoryMessage:new({
-  --   role = "assistant",
-  --   content = opts.result,
-  -- }, {
-  --   just_for_display = true,
-  -- })
-  -- sidebar:add_history_messages({ message })
-  if opts.command then
+  local message = HistoryMessage:new({
+    role = "assistant",
+    content = opts.result,
+  }, {
+    just_for_display = true,
+  })
+  sidebar:add_history_messages({ message })
+  if opts.command and opts.command ~= "" and opts.command ~= vim.NIL then
     require("avante.llm_tools.bash").func({ command = opts.command }, on_log, on_complete, session_ctx)
   else
     on_complete(true, nil)

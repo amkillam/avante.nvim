@@ -25,7 +25,7 @@ local group = api.nvim_create_augroup("avante_llm", { clear = true })
 ---@param cb fun(title: string | nil): nil
 function M.summarize_chat_thread_title(content, cb)
   local system_prompt =
-    [[Summarize the content as a title for the chat thread. The title should be a concise and informative summary of the conversation, capturing the main points and key takeaways. It should be no longer than 100 words and should be written in a clear and engaging style. The title should be suitable for use as the title of a chat thread on a messaging platform or other communication medium.]]
+    [[Summarize the content as a title for the chat thread. The title should be a concise and informative summary of the conversation, capturing the main points and key takeaways. It should be no longer than 100 words and should be written in a clear and engaging style. The title should be suitable for use as the title of a chat thread on a messaging platform or other communication medium. /no_think]]
   local response_content = ""
   local provider = Providers.get_memory_summary_provider()
   M.curl({
@@ -401,59 +401,16 @@ function M.generate_prompts(opts)
 
   local final_history_messages = {}
   if cleaned_history_messages then
-    if opts.disable_compact_history_messages then
-      for i, msg in ipairs(cleaned_history_messages) do
-        if Utils.is_tool_use_message(msg) then
-          local next_msg = cleaned_history_messages[i + 1]
-          if not next_msg or not Utils.is_tool_result_message(next_msg) then goto continue end
-          if next_msg.message.content[1].tool_use_id ~= msg.message.content[1].id then goto continue end
-        end
-        if Utils.is_tool_result_message(msg) and not Utils.get_tool_use_message(msg, cleaned_history_messages) then
-          goto continue
-        end
-        table.insert(final_history_messages, msg)
-        ::continue::
+    for _, msg in ipairs(cleaned_history_messages) do
+      local tool_result_message
+      if Utils.is_tool_use_message(msg) then
+        tool_result_message = Utils.get_tool_result_message(msg, cleaned_history_messages)
+        if not tool_result_message then goto continue end
       end
-    else
-      if Config.history.max_tokens > 0 then
-        remaining_tokens = math.min(Config.history.max_tokens, remaining_tokens)
-      end
-
-      -- Traverse the history in reverse, keeping only the latest history until the remaining tokens are exhausted and the first message role is "user"
-      local retained_history_messages = {}
-      for i = #cleaned_history_messages, 1, -1 do
-        local message = cleaned_history_messages[i]
-        local tokens = Utils.tokens.calculate_tokens(message.message.content)
-        remaining_tokens = remaining_tokens - tokens
-        if remaining_tokens > 0 then
-          table.insert(retained_history_messages, 1, message)
-        else
-          break
-        end
-      end
-
-      if #retained_history_messages == 0 then
-        retained_history_messages =
-          vim.list_slice(cleaned_history_messages, #cleaned_history_messages - 1, #cleaned_history_messages)
-      end
-
-      pending_compaction_history_messages =
-        vim.list_slice(cleaned_history_messages, 1, #cleaned_history_messages - #retained_history_messages)
-
-      pending_compaction_history_messages = vim
-        .iter(pending_compaction_history_messages)
-        :filter(function(msg) return msg.is_dummy ~= true end)
-        :totable()
-
-      vim.iter(retained_history_messages):each(function(msg)
-        if Utils.is_tool_use_message(msg) and not Utils.get_tool_result_message(msg, retained_history_messages) then
-          return
-        end
-        if Utils.is_tool_result_message(msg) and not Utils.get_tool_use_message(msg, retained_history_messages) then
-          return
-        end
-        table.insert(final_history_messages, msg)
-      end)
+      if Utils.is_tool_result_message(msg) then goto continue end
+      table.insert(final_history_messages, msg)
+      if tool_result_message then table.insert(final_history_messages, tool_result_message) end
+      ::continue::
     end
   end
 
@@ -804,7 +761,12 @@ function M._stream(opts)
               },
             })
           end
-          opts.on_messages_add(messages)
+          if opts.on_messages_add then opts.on_messages_add(messages) end
+          local the_last_tool_use = tool_use_list[#tool_use_list]
+          if the_last_tool_use and the_last_tool_use.name == "attempt_completion" then
+            opts.on_stop({ reason = "complete" })
+            return
+          end
           local new_opts = vim.tbl_deep_extend("force", opts, {
             history_messages = opts.get_history_messages(),
           })
@@ -892,12 +854,8 @@ function M._stream(opts)
         if is_break then break end
         ::continue::
       end
-      local sorted_tool_use_list = {} ---@type AvanteLLMToolUse[]
-      for _, tool_use in vim.spairs(tool_use_list) do
-        table.insert(sorted_tool_use_list, tool_use)
-      end
       if stop_opts.reason == "complete" and Config.mode == "agentic" then
-        if #sorted_tool_use_list == 0 then
+        if #tool_use_list == 0 then
           local completed_attempt_completion_tool_use = nil
           for idx = #history_messages, 1, -1 do
             local message = history_messages[idx]
@@ -908,7 +866,9 @@ function M._stream(opts)
             if message then break end
             ::continue::
           end
-          if not completed_attempt_completion_tool_use and opts.on_messages_add then
+          local user_reminder_count = opts.session_ctx.user_reminder_count or 0
+          if not completed_attempt_completion_tool_use and opts.on_messages_add and user_reminder_count < 3 then
+            opts.session_ctx.user_reminder_count = user_reminder_count + 1
             local message = HistoryMessage:new({
               role = "user",
               content = "<user-reminder>You should use tool calls to answer the question, for example, use attempt_completion if the job is done.</user-reminder>",
@@ -932,7 +892,7 @@ function M._stream(opts)
           end
         end
       end
-      if stop_opts.reason == "tool_use" then return handle_next_tool_use(sorted_tool_use_list, 1, {}) end
+      if stop_opts.reason == "tool_use" then return handle_next_tool_use(tool_use_list, 1, {}) end
       if stop_opts.reason == "rate_limit" then
         local msg_content = "*[Rate limit reached. Retrying in " .. stop_opts.retry_after .. " seconds ...]*"
         if opts.on_chunk then opts.on_chunk("\n" .. msg_content .. "\n") end
