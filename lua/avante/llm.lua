@@ -871,7 +871,7 @@ function M._stream(opts)
             opts.session_ctx.user_reminder_count = user_reminder_count + 1
             local message = HistoryMessage:new({
               role = "user",
-              content = "<user-reminder>You should use tool calls to answer the question, for example, use attempt_completion if the job is done.</user-reminder>",
+              content = "<user-reminder>You should use tool calls to ensure you complete your assigned task. For example, use your `attempt_completion` toolcall if you have successfully completed your assigned task.</user-reminder>",
             }, {
               visible = false,
             })
