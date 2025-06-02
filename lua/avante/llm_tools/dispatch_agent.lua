@@ -12,10 +12,10 @@ M.name = "dispatch_agent"
 M.get_description = function()
   local provider = Providers[Config.provider]
   if Config.provider:match("copilot") and provider.model and provider.model:match("gpt") then
-    return [[Launch a new agent that has access to the following tools: `glob`, `grep`, `ls`, `view`, `attempt_completion`. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you.]]
+    return [[Launch a new agent that has access to the following tools: `base`, `create`, `attempt_completion`, `bash`, `dispatch_agent`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you.]]
   end
 
-  return [[Launch a new agent that has access to the following tools: `glob`, `grep`, `ls`, `view`, `attempt_completion`. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you. For example:
+  return [[Launch a new agent that has access to the following tools: `base`, `create`, `attempt_completion`, `bash`, `dispatch_agent`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you. For example:
 
 - If you are searching for a keyword like "config" or "logger", the Agent tool is appropriate
 - If you want to read a specific file path, use the `view` or `glob` tool instead of the `dispatch_agent` tool, to find the match more quickly
@@ -34,8 +34,7 @@ Usage notes:
 1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
 2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
 3. Each agent invocation is stateless. You will not be able to send additional messages to the agent, nor will the agent be able to communicate with you outside of its final report. Therefore, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
-4. The agent's outputs should generally be trusted
-5. IMPORTANT: The agent can not use `bash`, `write`, `str_replace`, so can not modify files. If you want to use these tools, use them directly instead of going through the agent.]]
+4. The agent's outputs should generally be trusted]]
 end
 
 ---@type AvanteLLMToolParam
@@ -70,12 +69,23 @@ M.returns = {
 }
 
 local function get_available_tools()
+  -- `base`, `create`, `helpers`, `attempt_completion`, `bash`, `dispatch_agent`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`
   return {
-    require("avante.llm_tools.ls"),
-    require("avante.llm_tools.grep"),
-    require("avante.llm_tools.glob"),
-    require("avante.llm_tools.view"),
+    require("avante.llm_tools.base"),
+    require("avante.llm_tools.create"),
     require("avante.llm_tools.attempt_completion"),
+    require("avante.llm_tools.bash"),
+    require("avante.llm_tools.dispatch_agent"),
+    require("avante.llm_tools.get_diagnostics"),
+    require("avante.llm_tools.glob"),
+    require("avante.llm_tools.grep"),
+    require("avante.llm_tools.insert"),
+    require("avante.llm_tools.ls"),
+    require("avante.llm_tools.replace_in_file"),
+    require("avante.llm_tools.str_replace"),
+    require("avante.llm_tools.undo_edit"),
+    require("avante.llm_tools.view"),
+    require("avante.llm_tools.write_to_file"),
   }
 end
 
