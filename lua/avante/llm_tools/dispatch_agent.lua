@@ -12,12 +12,10 @@ M.name = "dispatch_agent"
 M.get_description = function()
   local provider = Providers[Config.provider]
   if Config.provider:match("copilot") and provider.model and provider.model:match("gpt") then
-    return
-    [[Launch a new agent that has access to the following tools: `create`, `attempt_completion`, `bash`, `dispatch_agent`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When given a task which may be divided into granular steps with clearly defined scope, use the Agent tool to perform each step.]]
+    return [[Launch a new agent that has access to the following tools: `create`, `attempt_completion`, `bash`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When given a task which may be divided into granular steps with clearly defined scope, use the Agent tool to perform each step.]]
   end
 
-  return
-  [[Launch a new agent that has access to the following tools: `create`, `attempt_completion`, `bash`, `dispatch_agent`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When given a task which may be divided into granular steps with clearly defined scope, use the Agent tool to perform each step. For example:
+  return [[Launch a new agent that has access to the following tools: `create`, `attempt_completion`, `bash`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When given a task which may be divided into granular steps with clearly defined scope, use the Agent tool to perform each step. For example:
 
 - If you need to perform a task with a clearly defined scope that can be executed independently of the project's full context
 - If you have a very large task that would be inefficient to execute sequentially with all other steps
@@ -75,7 +73,6 @@ local function get_available_tools()
     require("avante.llm_tools.create"),
     require("avante.llm_tools.attempt_completion"),
     require("avante.llm_tools.bash"),
-    require("avante.llm_tools.dispatch_agent"),
     require("avante.llm_tools.get_diagnostics"),
     require("avante.llm_tools.glob"),
     require("avante.llm_tools.grep"),
@@ -169,12 +166,12 @@ When you're done, provide a clear and concise summary of what you found.]]):gsub
       local elapsed_time = Utils.datetime_diff(start_time, end_time)
       local tool_use_count = vim.tbl_count(tool_use_messages)
       local summary = "dispatch_agent Done ("
-          .. (tool_use_count <= 1 and "1 tool use" or tool_use_count .. " tool uses")
-          .. " · "
-          .. math.ceil(total_tokens)
-          .. " tokens · "
-          .. elapsed_time
-          .. "s)"
+        .. (tool_use_count <= 1 and "1 tool use" or tool_use_count .. " tool uses")
+        .. " · "
+        .. math.ceil(total_tokens)
+        .. " tokens · "
+        .. elapsed_time
+        .. "s)"
       if session_ctx.on_messages_add then
         local message = HistoryMessage:new({
           role = "assistant",
@@ -195,7 +192,7 @@ When you're done, provide a clear and concise summary of what you found.]]):gsub
       local new_history_messages = {}
       for _, msg in ipairs(history_messages) do
         if
-            vim
+          vim
             .iter(pending_compaction_history_messages)
             :find(function(pending_compaction_msg) return pending_compaction_msg.uuid == msg.uuid end)
         then
@@ -215,4 +212,3 @@ When you're done, provide a clear and concise summary of what you found.]]):gsub
 end
 
 return M
-
