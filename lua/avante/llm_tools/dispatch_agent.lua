@@ -12,10 +12,10 @@ M.name = "dispatch_agent"
 M.get_description = function()
   local provider = Providers[Config.provider]
   if Config.provider:match("copilot") and provider.model and provider.model:match("gpt") then
-    return [[Launch a new agent that has access to the following tools: `base`, `create`, `attempt_completion`, `bash`, `dispatch_agent`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you.]]
+    return [[Launch a new agent that has access to the following tools: `create`, `attempt_completion`, `bash`, `dispatch_agent`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you.]]
   end
 
-  return [[Launch a new agent that has access to the following tools: `base`, `create`, `attempt_completion`, `bash`, `dispatch_agent`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you. For example:
+  return [[Launch a new agent that has access to the following tools: `create`, `attempt_completion`, `bash`, `dispatch_agent`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When you are searching for a keyword or file and are not confident that you will find the right match on the first try, use the Agent tool to perform the search for you. For example:
 
 - If you are searching for a keyword like "config" or "logger", the Agent tool is appropriate
 - If you want to read a specific file path, use the `view` or `glob` tool instead of the `dispatch_agent` tool, to find the match more quickly
@@ -69,9 +69,7 @@ M.returns = {
 }
 
 local function get_available_tools()
-  -- `base`, `create`, `helpers`, `attempt_completion`, `bash`, `dispatch_agent`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`
   return {
-    require("avante.llm_tools.base"),
     require("avante.llm_tools.create"),
     require("avante.llm_tools.attempt_completion"),
     require("avante.llm_tools.bash"),
