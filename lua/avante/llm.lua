@@ -854,44 +854,6 @@ function M._stream(opts)
         if is_break then break end
         ::continue::
       end
-      if stop_opts.reason == "complete" and Config.mode == "agentic" then
-        if #tool_use_list == 0 then
-          local completed_attempt_completion_tool_use = nil
-          for idx = #history_messages, 1, -1 do
-            local message = history_messages[idx]
-            if message.is_user_submission then break end
-            if not Utils.is_tool_use_message(message) then goto continue end
-            if message.message.content[1].name ~= "attempt_completion" then break end
-            completed_attempt_completion_tool_use = message
-            if message then break end
-            ::continue::
-          end
-          local user_reminder_count = opts.session_ctx.user_reminder_count or 0
-          if not completed_attempt_completion_tool_use and opts.on_messages_add and user_reminder_count < 3 then
-            opts.session_ctx.user_reminder_count = user_reminder_count + 1
-            local message = HistoryMessage:new({
-              role = "user",
-              content = "<user-reminder>You should use tool calls to ensure you complete your assigned task. For example, use your `attempt_completion` toolcall if you have successfully completed your assigned task.</user-reminder>",
-            }, {
-              visible = false,
-            })
-            opts.on_messages_add({ message })
-            local new_opts = vim.tbl_deep_extend("force", opts, {
-              history_messages = opts.get_history_messages(),
-            })
-            if provider.get_rate_limit_sleep_time then
-              local sleep_time = provider:get_rate_limit_sleep_time(resp_headers)
-              if sleep_time and sleep_time > 0 then
-                Utils.info("Rate limit reached. Sleeping for " .. sleep_time .. " seconds ...")
-                vim.defer_fn(function() M._stream(new_opts) end, sleep_time * 1000)
-                return
-              end
-            end
-            M._stream(new_opts)
-            return
-          end
-        end
-      end
       if stop_opts.reason == "tool_use" then return handle_next_tool_use(tool_use_list, 1, {}) end
       if stop_opts.reason == "rate_limit" then
         local msg_content = "*[Rate limit reached. Retrying in " .. stop_opts.retry_after .. " seconds ...]*"
