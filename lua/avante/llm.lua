@@ -25,7 +25,7 @@ local group = api.nvim_create_augroup("avante_llm", { clear = true })
 ---@param cb fun(title: string | nil): nil
 function M.summarize_chat_thread_title(content, cb)
   local system_prompt =
-  [[Summarize the content as a title for the chat thread. The title should be a concise and informative summary of the conversation, capturing the main points and key takeaways. It should be no longer than 100 words and should be written in a clear and engaging style. The title should be suitable for use as the title of a chat thread on a messaging platform or other communication medium. /no_think]]
+    [[Summarize the content as a title for the chat thread. The title should be a concise and informative summary of the conversation, capturing the main points and key takeaways. It should be no longer than 100 words and should be written in a clear and engaging style. The title should be suitable for use as the title of a chat thread on a messaging platform or other communication medium. /no_think]]
   local response_content = ""
   local provider = Providers.get_memory_summary_provider()
   M.curl({
@@ -64,7 +64,7 @@ end
 ---@param cb fun(memory: avante.ChatMemory | nil): nil
 function M.summarize_memory(prev_memory, history_messages, cb)
   local system_prompt =
-  [[You are an expert coding assistant. Your goal is to generate a concise, structured summary of the conversation below that captures all essential information needed to continue development after context replacement. Include tasks performed, code areas modified or reviewed, key decisions or assumptions, test results or errors, and outstanding tasks or next steps.]]
+    [[You are an expert coding assistant. Your goal is to generate a concise, structured summary of the conversation below that captures all essential information needed to continue development after context replacement. Include tasks performed, code areas modified or reviewed, key decisions or assumptions, test results or errors, and outstanding tasks or next steps.]]
   if #history_messages == 0 then
     cb(nil)
     return
@@ -72,22 +72,21 @@ function M.summarize_memory(prev_memory, history_messages, cb)
   local latest_timestamp = history_messages[#history_messages].timestamp
   local latest_message_uuid = history_messages[#history_messages].uuid
   local conversation_items = vim
-      .iter(history_messages)
-      :filter(function(msg)
-        if msg.just_for_display then return false end
-        if msg.message.role ~= "assistant" and msg.message.role ~= "user" then return false end
-        local content = msg.message.content
-        if type(content) == "table" and content[1].type == "tool_result" then return false end
-        if type(content) == "table" and content[1].type == "tool_use" then return false end
-        return true
-      end)
-      :map(function(msg) return msg.message.role .. ": " .. Utils.message_to_text(msg, history_messages) end)
-      :totable()
+    .iter(history_messages)
+    :filter(function(msg)
+      if msg.just_for_display then return false end
+      if msg.message.role ~= "assistant" and msg.message.role ~= "user" then return false end
+      local content = msg.message.content
+      if type(content) == "table" and content[1].type == "tool_result" then return false end
+      if type(content) == "table" and content[1].type == "tool_use" then return false end
+      return true
+    end)
+    :map(function(msg) return msg.message.role .. ": " .. Utils.message_to_text(msg, history_messages) end)
+    :totable()
   local conversation_text = table.concat(conversation_items, "\n")
   local user_prompt = "Here is the conversation so far:\n"
-      .. conversation_text
-      ..
-      "\n\nPlease summarize this conversation, covering:\n1. Tasks performed and outcomes\n2. Code files, modules, or functions modified or examined\n3. Important decisions or assumptions made\n4. Errors encountered and test or build results\n5. Remaining tasks, open questions, or next steps\nProvide the summary in a clear, concise format."
+    .. conversation_text
+    .. "\n\nPlease summarize this conversation, covering:\n1. Tasks performed and outcomes\n2. Code files, modules, or functions modified or examined\n3. Important decisions or assumptions made\n4. Errors encountered and test or build results\n5. Remaining tasks, open questions, or next steps\nProvide the summary in a clear, concise format."
   if prev_memory then user_prompt = user_prompt .. "\n\nThe previous summary is:\n\n" .. prev_memory end
   local messages = {
     {
@@ -291,7 +290,7 @@ function M.generate_prompts(opts)
           if not latest_tool_id then goto continue end
           if latest_tool_id ~= item.tool_use_id then
             item.content =
-                string.format("The file %s has been updated. Please use the latest `view` tool result!", path)
+              string.format("The file %s has been updated. Please use the latest `view` tool result!", path)
           else
             local view_result, view_error = require("avante.llm_tools.view").func({ path = path }, nil, nil, nil)
             if view_error then view_result = "Error: " .. view_error end
@@ -395,7 +394,7 @@ function M.generate_prompts(opts)
   local pending_compaction_history_messages = {}
   if opts.prompt_opts and opts.prompt_opts.pending_compaction_history_messages then
     pending_compaction_history_messages =
-        vim.list_extend(pending_compaction_history_messages, opts.prompt_opts.pending_compaction_history_messages)
+      vim.list_extend(pending_compaction_history_messages, opts.prompt_opts.pending_compaction_history_messages)
   end
 
   local cleaned_history_messages = history_messages
@@ -423,9 +422,9 @@ function M.generate_prompts(opts)
   end
 
   messages = vim
-      .iter(messages)
-      :filter(function(msg) return type(msg.content) ~= "string" or msg.content ~= "" end)
-      :totable()
+    .iter(messages)
+    :filter(function(msg) return type(msg.content) ~= "string" or msg.content ~= "" end)
+    :totable()
 
   if opts.instructions ~= nil and opts.instructions ~= "" then
     messages = vim.list_extend(messages, { { role = "user", content = opts.instructions } })
@@ -595,15 +594,15 @@ function M.curl(opts)
         if not xdg_runtime_dir or fn.isdirectory(xdg_runtime_dir) == 0 then
           Utils.error(
             "$XDG_RUNTIME_DIR="
-            .. xdg_runtime_dir
-            .. " is set but does not exist. curl could not write output. Please make sure it exists, or unset.",
+              .. xdg_runtime_dir
+              .. " is set but does not exist. curl could not write output. Please make sure it exists, or unset.",
             { title = "Avante" }
           )
         elseif not uv.fs_access(xdg_runtime_dir, "w") then
           Utils.error(
             "$XDG_RUNTIME_DIR="
-            .. xdg_runtime_dir
-            .. " exists but is not writable. curl could not write output. Please make sure it is writable, or unset.",
+              .. xdg_runtime_dir
+              .. " exists but is not writable. curl could not write output. Please make sure it is writable, or unset.",
             { title = "Avante" }
           )
         end
@@ -725,9 +724,9 @@ function M._stream(opts)
   local prompt_opts = M.generate_prompts(opts)
 
   if
-      prompt_opts.pending_compaction_history_messages
-      and #prompt_opts.pending_compaction_history_messages > 0
-      and opts.on_memory_summarize
+    prompt_opts.pending_compaction_history_messages
+    and #prompt_opts.pending_compaction_history_messages > 0
+    and opts.on_memory_summarize
   then
     opts.on_memory_summarize(prompt_opts.pending_compaction_history_messages)
     return
@@ -868,12 +867,11 @@ function M._stream(opts)
             ::continue::
           end
           local user_reminder_count = opts.session_ctx.user_reminder_count or 0
-          if not completed_attempt_completion_tool_use and opts.on_messages_add  then
+          if not completed_attempt_completion_tool_use and opts.on_messages_add then
             opts.session_ctx.user_reminder_count = user_reminder_count + 1
             local message = HistoryMessage:new({
               role = "user",
-              content =
-              "<user-reminder>You should use tool calls to ensure you complete your assigned task. For example, use your `attempt_completion` toolcall if you have successfully completed your assigned task. You may not stop until you call your `attempt_completion` toolcall.</user-reminder>",
+              content = "<user-reminder>You should use tool calls to ensure you complete your assigned task. For example, use your `attempt_completion` toolcall if you have successfully completed your assigned task. You may not stop until you call your `attempt_completion` toolcall.</user-reminder>",
             }, {
               visible = false,
             })
@@ -951,8 +949,8 @@ end
 local function _merge_response(first_response, second_response, opts)
   local prompt = "\n" .. Config.dual_boost.prompt
   prompt = prompt
-      :gsub("{{[%s]*provider1_output[%s]*}}", function() return first_response end)
-      :gsub("{{[%s]*provider2_output[%s]*}}", function() return second_response end)
+    :gsub("{{[%s]*provider1_output[%s]*}}", function() return first_response end)
+    :gsub("{{[%s]*provider2_output[%s]*}}", function() return second_response end)
 
   prompt = prompt .. "\n"
 
