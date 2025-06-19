@@ -12,10 +12,12 @@ M.name = "dispatch_agent"
 M.get_description = function()
   local provider = Providers[Config.provider]
   if Config.provider:match("copilot") and provider.model and provider.model:match("gpt") then
-    return [[Launch a new agent that has access to the following tools: `create`, `attempt_completion`, `bash`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When given a task which may be divided into granular steps with clearly defined scope, use the Agent tool to perform each step.]]
+    return
+    [[Launch a new agent that has access to the following tools: `create`, `attempt_completion`, `bash`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When given a task which may be divided into granular steps with clearly defined scope, use the Agent tool to perform each step.]]
   end
 
-  return [[Launch a new agent that has access to the following tools: `create`, `attempt_completion`, `bash`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When given a task which may be divided into granular steps with clearly defined scope, use the Agent tool to perform each step. For example:
+  return
+  [[Launch a new agent that has access to the following tools: `create`, `attempt_completion`, `bash`, `get_diagnostics`, `glob`, `grep`, `insert`, `ls`, `replace_in_file`, `str_replace`, `undo_edit`, `view`, `write_to_file`. When given a task which may be divided into granular steps with clearly defined scope, use the Agent tool to perform each step. For example:
 
 - If you need to perform a task with a clearly defined scope that can be executed independently of the project's full context
 - If you have a very large task that would be inefficient to execute sequentially with all other steps
@@ -78,7 +80,6 @@ local function get_available_tools()
     require("avante.llm_tools.grep"),
     require("avante.llm_tools.insert"),
     require("avante.llm_tools.ls"),
-    require("avante.llm_tools.replace_in_file"),
     require("avante.llm_tools.str_replace"),
     require("avante.llm_tools.undo_edit"),
     require("avante.llm_tools.view"),

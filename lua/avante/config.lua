@@ -300,11 +300,14 @@ M._defaults = {
   },
   ---@type AvanteSupportedProvider
   vertex_claude = {
-    endpoint = "https://LOCATION-aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/publishers/antrhopic/models",
-    model = "claude-3-5-sonnet-v2@20241022",
-    timeout = 30000, -- Timeout in milliseconds
-    temperature = 0.75,
-    max_tokens = 20480,
+    endpoint =
+    "https://LOCATION-aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/LOCATION/publishers/anthropic/models",
+
+    model = "claude-sonnet-4@20250514",
+    timeout = 120000, -- Timeout in milliseconds
+    temperature = 0,
+    max_tokens = 64000,
+    thinking_budget = 32000,
   },
   ---To add support for custom provider, follow the format below
   ---See https://github.com/yetone/avante.nvim/wiki#custom-providers for more details
@@ -361,7 +364,8 @@ M._defaults = {
     enabled = false,
     first_provider = "openai",
     second_provider = "claude",
-    prompt = "Based on the two reference outputs below, generate a response that incorporates elements from both but reflects your own judgment and unique perspective. Do not provide any explanation, just give the response directly. Reference Output 1: [{{provider1_output}}], Reference Output 2: [{{provider2_output}}]",
+    prompt =
+    "Based on the two reference outputs below, generate a response that incorporates elements from both but reflects your own judgment and unique perspective. Do not provide any explanation, just give the response directly. Reference Output 1: [{{provider1_output}}], Reference Output 2: [{{provider2_output}}]",
     timeout = 60000, -- Timeout in milliseconds
   },
   ---Specify the behaviour of avante.nvim
