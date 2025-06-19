@@ -115,7 +115,6 @@ When you're done, provide a clear and concise summary of what you found.]]):gsub
 
   local stream_options = {
     ask = true,
-    disable_compact_history_messages = true,
     memory = memory_content,
     code_lang = "unknown",
     provider = Providers[Config.provider],

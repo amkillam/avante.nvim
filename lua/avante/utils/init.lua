@@ -6,6 +6,7 @@ local lsp = vim.lsp
 ---@field tokens avante.utils.tokens
 ---@field root avante.utils.root
 ---@field file avante.utils.file
+---@field path avante.utils.path
 ---@field environment avante.utils.environment
 ---@field lsp avante.utils.lsp
 local M = {}
@@ -32,20 +33,9 @@ function M.has(plugin)
   return res
 end
 
-local _is_win = nil
+function M.is_win() return M.path.is_win() end
 
-function M.is_win()
-  if _is_win == nil then _is_win = jit.os:find("Windows") ~= nil end
-  return _is_win
-end
-
-M.path_sep = (function()
-  if M.is_win() then
-    return "\\"
-  else
-    return "/"
-  end
-end)()
+M.path_sep = M.path.SEP
 
 ---@return "linux" | "darwin" | "windows"
 function M.get_os_name()
@@ -340,7 +330,7 @@ end
 
 ---@param path string
 ---@return string
-function M.norm(path) return vim.fs.normalize(path) end
+function M.norm(path) return M.path.normalize(path) end
 
 ---@param msg string|string[]
 ---@param opts? LazyNotifyOpts
@@ -566,17 +556,69 @@ function M.is_type(type_name, v)
 end
 -- luacheck: pop
 
----@param code string
+---@param text string
 ---@return string
-function M.get_indentation(code)
-  if not code then return "" end
-  return code:match("^%s*") or ""
+function M.get_indentation(text)
+  if not text then return "" end
+  return text:match("^%s*") or ""
 end
 
---- remove indentation from code: spaces or tabs
-function M.remove_indentation(code)
-  if not code then return code end
-  return code:gsub("%s*", "")
+function M.trim_space(text)
+  if not text then return text end
+  return text:gsub("%s*", "")
+end
+
+---@param original_lines string[]
+---@param target_lines string[]
+---@param compare_fn fun(line_a: string, line_b: string): boolean
+---@return integer | nil start_line
+---@return integer | nil end_line
+function M.try_find_match(original_lines, target_lines, compare_fn)
+  local start_line, end_line
+  for i = 1, #original_lines - #target_lines + 1 do
+    local match = true
+    for j = 1, #target_lines do
+      if not compare_fn(original_lines[i + j - 1], target_lines[j]) then
+        match = false
+        break
+      end
+    end
+    if match then
+      start_line = i
+      end_line = i + #target_lines - 1
+      break
+    end
+  end
+  return start_line, end_line
+end
+
+---@param original_lines string[]
+---@param target_lines string[]
+---@return integer | nil start_line
+---@return integer | nil end_line
+function M.fuzzy_match(original_lines, target_lines)
+  local start_line, end_line
+  ---exact match
+  start_line, end_line = M.try_find_match(
+    original_lines,
+    target_lines,
+    function(line_a, line_b) return line_a == line_b end
+  )
+  if start_line ~= nil and end_line ~= nil then return start_line, end_line end
+  ---fuzzy match
+  start_line, end_line = M.try_find_match(
+    original_lines,
+    target_lines,
+    function(line_a, line_b) return M.trim(line_a, { suffix = " \t" }) == M.trim(line_b, { suffix = " \t" }) end
+  )
+  if start_line ~= nil and end_line ~= nil then return start_line, end_line end
+  ---trim_space match
+  start_line, end_line = M.try_find_match(
+    original_lines,
+    target_lines,
+    function(line_a, line_b) return M.trim_space(line_a) == M.trim_space(line_b) end
+  )
+  return start_line, end_line
 end
 
 function M.relative_path(absolute)
@@ -747,7 +789,7 @@ function M.scan_directory(options)
   local cmd_supports_max_depth = true
   local cmd = (function()
     if vim.fn.executable("rg") == 1 then
-      local cmd = { "rg", "--files", "--color", "never", "--no-require-git" }
+      local cmd = { "rg", "--files", "--color", "never", "--no-require-git", "--no-ignore-parent" }
       if options.max_depth ~= nil then vim.list_extend(cmd, { "--max-depth", options.max_depth }) end
       table.insert(cmd, options.directory)
       return cmd
@@ -788,7 +830,7 @@ function M.scan_directory(options)
       end
       cmd_supports_max_depth = false
     else
-      M.error("No search command found")
+      M.error("No search command found, please install fd or fdfind or rg")
       return {}
     end
   end
@@ -848,25 +890,14 @@ function M.get_parent_path(filepath)
   return res
 end
 
-function M.make_relative_path(filepath, base_dir)
-  if filepath:sub(-2) == M.path_sep .. "." then filepath = filepath:sub(1, -3) end
-  if base_dir:sub(-2) == M.path_sep .. "." then base_dir = base_dir:sub(1, -3) end
-  if filepath == base_dir then return "." end
-  if filepath:sub(1, #base_dir) == base_dir then
-    filepath = filepath:sub(#base_dir + 1)
-    if filepath:sub(1, 2) == "." .. M.path_sep then
-      filepath = filepath:sub(3)
-    elseif filepath:sub(1, 1) == M.path_sep then
-      filepath = filepath:sub(2)
-    end
-  end
-  return filepath
-end
+function M.make_relative_path(filepath, base_dir) return M.path.relative(base_dir, filepath, false) end
 
-function M.is_absolute_path(path)
-  if not path then return false end
-  if M.is_win() then return path:match("^%a:[/\\]") ~= nil end
-  return path:match("^/") ~= nil
+function M.is_absolute_path(path) return M.path.is_absolute(path) end
+
+function M.to_absolute_path(path)
+  if not path or path == "" then return path end
+  if path:sub(1, 1) == "/" or path:sub(1, 7) == "term://" then return path end
+  return M.join_paths(M.get_project_root(), path)
 end
 
 function M.join_paths(...)
@@ -881,16 +912,13 @@ function M.join_paths(...)
       goto continue
     end
 
-    if path:sub(1, 2) == "." .. M.path_sep then path = path:sub(3) end
-
-    if result ~= "" and result:sub(-1) ~= M.path_sep then result = result .. M.path_sep end
-    result = result .. path
+    result = result == "" and path or M.path.join(result, path)
     ::continue::
   end
   return M.norm(result)
 end
 
-function M.path_exists(path) return vim.loop.fs_stat(path) ~= nil end
+function M.path_exists(path) return M.path.is_exist(path) end
 
 function M.is_first_letter_uppercase(str) return string.match(str, "^[A-Z]") ~= nil end
 
@@ -1094,7 +1122,7 @@ end
 ---@return string[]|nil lines
 ---@return string|nil error
 function M.read_file_from_buf_or_disk(filepath)
-  local abs_path = M.join_paths(M.get_project_root(), filepath)
+  local abs_path = filepath:sub(1, 7) == "term://" and filepath or M.join_paths(M.get_project_root(), filepath)
   --- Lookup if the file is loaded in a buffer
   local bufnr = vim.fn.bufnr(abs_path)
   if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
@@ -1102,6 +1130,9 @@ function M.read_file_from_buf_or_disk(filepath)
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     return lines, nil
   end
+
+  local stat = vim.uv.fs_stat(abs_path)
+  if stat and stat.type == "directory" then return {}, "Cannot read a directory as file" .. filepath end
 
   -- Fallback: read file from disk
   local file, open_err = io.open(abs_path, "r")
@@ -1238,11 +1269,20 @@ function M.llm_tool_param_fields_to_json_schema(fields)
         properties = properties_,
         required = required_,
       }
+    elseif field.type == "array" and field.items then
+      local properties_ = M.llm_tool_param_fields_to_json_schema({ field.items })
+      local _, obj = next(properties_)
+      properties[field.name] = {
+        type = field.type,
+        description = field.get_description and field.get_description() or field.description,
+        items = obj,
+      }
     else
       properties[field.name] = {
         type = field.type,
         description = field.get_description and field.get_description() or field.description,
       }
+      if field.choices then properties[field.name].enum = field.choices end
     end
     if not field.optional then table.insert(required, field.name) end
   end
@@ -1424,6 +1464,61 @@ function M.get_tool_use_message(message, messages)
   return nil
 end
 
+---@param tool_use AvanteLLMToolUse
+function M.tool_use_to_xml(tool_use)
+  local xml = string.format("<%s>\n", tool_use.name)
+  for k, v in pairs(tool_use.input or {}) do
+    xml = xml .. string.format("<%s>%s</%s>\n", k, tostring(v), k)
+  end
+  xml = xml .. "</" .. tool_use.name .. ">"
+  return xml
+end
+
+---@param tool_use AvanteLLMToolUse
+function M.is_edit_func_call_tool_use(tool_use)
+  local is_replace_func_call = false
+  local is_str_replace_editor_func_call = false
+  local is_str_replace_based_edit_tool_func_call = false
+  local path = nil
+  if tool_use.name == "write_to_file" then
+    is_replace_func_call = true
+    path = tool_use.input.path
+  end
+  if tool_use.name == "replace_in_file" then
+    is_replace_func_call = true
+    path = tool_use.input.path
+  end
+  if tool_use.name == "str_replace_editor" then
+    if tool_use.input.command == "str_replace" then
+      is_replace_func_call = true
+      is_str_replace_editor_func_call = true
+      path = tool_use.input.path
+    end
+  end
+  if tool_use.name == "str_replace_based_edit_tool" then
+    if tool_use.input.command == "str_replace" then
+      is_replace_func_call = true
+      is_str_replace_based_edit_tool_func_call = true
+      path = tool_use.input.path
+    end
+  end
+  return is_replace_func_call, is_str_replace_editor_func_call, is_str_replace_based_edit_tool_func_call, path
+end
+
+---@param tool_use_message avante.HistoryMessage | nil
+function M.is_edit_func_call_message(tool_use_message)
+  local is_replace_func_call = false
+  local is_str_replace_editor_func_call = false
+  local is_str_replace_based_edit_tool_func_call = false
+  local path = nil
+  if tool_use_message and M.is_tool_use_message(tool_use_message) then
+    local tool_use = tool_use_message.message.content[1]
+    ---@cast tool_use AvanteLLMToolUse
+    return M.is_edit_func_call_tool_use(tool_use)
+  end
+  return is_replace_func_call, is_str_replace_editor_func_call, is_str_replace_based_edit_tool_func_call, path
+end
+
 ---@param message avante.HistoryMessage
 ---@param messages avante.HistoryMessage[]
 ---@return avante.HistoryMessage | nil
@@ -1505,7 +1600,7 @@ function M.message_content_item_to_lines(item, message, messages)
       local hl = "AvanteStateSpinnerToolCalling"
       local ok, llm_tool = pcall(require, "avante.llm_tools." .. item.name)
       if ok then
-        if llm_tool.on_render then return llm_tool.on_render(item.input, message.tool_use_logs) end
+        if llm_tool.on_render then return llm_tool.on_render(item.input, message.tool_use_logs, message.state) end
       end
       local tool_result_message = M.get_tool_result_message(message, messages)
       if tool_result_message then
@@ -1589,6 +1684,70 @@ function M.message_to_text(message, messages)
     return table.concat(pieces, "\n")
   end
   return ""
+end
+
+function M.count_lines(str)
+  if not str or str == "" then return 0 end
+
+  local count = 1
+  local len = #str
+  local newline_byte = string.byte("\n")
+
+  for i = 1, len do
+    if str:byte(i) == newline_byte then count = count + 1 end
+  end
+
+  if str:byte(len) == newline_byte then count = count - 1 end
+
+  return count
+end
+
+function M.tbl_override(value, override)
+  override = override or {}
+  if type(override) == "function" then return override(value) or value end
+  return vim.tbl_extend("force", value, override)
+end
+
+---@param history_messages avante.HistoryMessage[]
+---@return AvantePartialLLMToolUse[]
+function M.get_uncalled_tool_uses(history_messages)
+  local partial_tool_use_list = {} ---@type AvantePartialLLMToolUse[]
+  local tool_result_seen = {}
+  for idx = #history_messages, 1, -1 do
+    local message = history_messages[idx]
+    local content = message.message.content
+    if type(content) ~= "table" or #content == 0 then goto continue end
+    local is_break = false
+    for _, item in ipairs(content) do
+      if item.type == "tool_use" then
+        if not tool_result_seen[item.id] then
+          local partial_tool_use = {
+            name = item.name,
+            id = item.id,
+            input = item.input,
+            state = message.state,
+          }
+          table.insert(partial_tool_use_list, 1, partial_tool_use)
+        else
+          is_break = true
+          break
+        end
+      end
+      if item.type == "tool_result" then tool_result_seen[item.tool_use_id] = true end
+    end
+    if is_break then break end
+    ::continue::
+  end
+  return partial_tool_use_list
+end
+
+function M.call_once(func)
+  local called = false
+  return function(...)
+    if called then return end
+    called = true
+    return func(...)
+  end
 end
 
 return M

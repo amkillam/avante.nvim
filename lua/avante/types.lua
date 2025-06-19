@@ -86,6 +86,12 @@ vim.g.avante_login = vim.g.avante_login
 ---@field role "user" | "assistant"
 ---@field content AvanteLLMMessageContent
 
+---@class avante.TODO
+---@field id string
+---@field content string
+---@field status "todo" | "doing" | "done" | "cancelled"
+---@field priority "low" | "medium" | "high"
+
 ---@class avante.HistoryMessage
 ---@field message AvanteLLMMessage
 ---@field timestamp string
@@ -102,6 +108,8 @@ vim.g.avante_login = vim.g.avante_login
 ---@field tool_use_logs string[] | nil
 ---@field just_for_display boolean | nil
 ---@field is_dummy boolean | nil
+---@field is_compacted boolean | nil
+---@field is_deleted boolean | nil
 ---
 ---@class AvanteLLMToolResult
 ---@field tool_name string
@@ -219,7 +227,7 @@ vim.g.avante_login = vim.g.avante_login
 ---
 ---@class AvanteDefaultBaseProvider: table<string, any>
 ---@field endpoint? string
----@field extra_headers? table<string, any>
+---@field extra_request_body? table<string, any>
 ---@field model? string
 ---@field local? boolean
 ---@field proxy? string
@@ -256,16 +264,13 @@ vim.g.avante_login = vim.g.avante_login
 ---
 ---@alias avante.HistoryMessageState "generating" | "generated"
 ---
----@class AvantePartialLLMToolUse
----@field name string
----@field id string
----@field partial_json table
----@field state avante.HistoryMessageState
----
 ---@class AvanteLLMToolUse
 ---@field name string
 ---@field id string
 ---@field input any
+---
+---@class AvantePartialLLMToolUse : AvanteLLMToolUse
+---@field state avante.HistoryMessageState
 ---
 ---@class AvanteLLMStartCallbackOptions
 ---@field usage? AvanteLLMUsage
@@ -276,6 +281,7 @@ vim.g.avante_login = vim.g.avante_login
 ---@field usage? AvanteLLMUsage
 ---@field retry_after? integer
 ---@field headers? table<string, string>
+---@field streaming_tool_use? boolean
 ---
 ---@alias AvanteStreamParser fun(self: AvanteProviderFunctor, ctx: any, line: string, handler_opts: AvanteHandlerOptions): nil
 ---@alias AvanteLLMStartCallback fun(opts: AvanteLLMStartCallbackOptions): nil
@@ -289,6 +295,8 @@ vim.g.avante_login = vim.g.avante_login
 ---@field parse_api_key? fun(): string | nil
 ---
 ---@class AvanteProviderFunctor
+---@field _model_list_cache table
+---@field extra_headers function(table) -> table | table | nil
 ---@field support_prompt_caching boolean | nil
 ---@field role_map table<"user" | "assistant", string>
 ---@field parse_messages AvanteMessagesParser
@@ -340,6 +348,7 @@ vim.g.avante_login = vim.g.avante_login
 ---@field selected_filepaths string[] | nil
 ---@field diagnostics string | nil
 ---@field history_messages avante.HistoryMessage[] | nil
+---@field get_todos? fun(): avante.TODO[]
 ---@field memory string | nil
 ---
 ---@class AvanteGeneratePromptsOptions: AvanteTemplateOptions
@@ -351,7 +360,6 @@ vim.g.avante_login = vim.g.avante_login
 ---@field update_snippets? string[]
 ---@field prompt_opts? AvantePromptOptions
 ---@field session_ctx? table
----@field disable_compact_history_messages? boolean
 ---
 ---@class AvanteLLMToolHistory
 ---@field tool_result? AvanteLLMToolResult
@@ -368,7 +376,7 @@ vim.g.avante_login = vim.g.avante_login
 ---@field on_stop AvanteLLMStopCallback
 ---@field on_memory_summarize? AvanteLLMMemorySummarizeCallback
 ---@field on_tool_log? fun(tool_id: string, tool_name: string, log: string, state: AvanteLLMToolUseState): nil
----@field get_history_messages? fun(): avante.HistoryMessage[]
+---@field get_history_messages? fun(opts?: { all?: boolean }): avante.HistoryMessage[]
 ---@field on_messages_add? fun(messages: avante.HistoryMessage[]): nil
 ---@field on_state_change? fun(state: avante.GenerateState): nil
 ---
@@ -379,7 +387,7 @@ vim.g.avante_login = vim.g.avante_login
 ---  session_ctx?: table)
 ---  : (boolean | string | nil, string | nil)
 ---
---- @alias AvanteLLMToolOnRender<T> fun(input: T, logs: string[]): avante.ui.Line[]
+--- @alias avante.LLMToolOnRender<T> fun(input: T, logs: string[], state: avante.HistoryMessageState | nil): avante.ui.Line[]
 ---
 ---@class AvanteLLMTool
 ---@field name string
@@ -389,7 +397,8 @@ vim.g.avante_login = vim.g.avante_login
 ---@field param AvanteLLMToolParam
 ---@field returns AvanteLLMToolReturn[]
 ---@field enabled? fun(opts: { user_input: string, history_messages: AvanteLLMMessage[] }): boolean
----@field on_render? AvanteLLMToolOnRender
+---@field on_render? avante.LLMToolOnRender
+---@field support_streaming? boolean
 
 ---@class AvanteLLMToolPublic : AvanteLLMTool
 ---@field func AvanteLLMToolFunc
@@ -403,8 +412,10 @@ vim.g.avante_login = vim.g.avante_login
 ---@field name string
 ---@field description? string
 ---@field get_description? fun(): string
----@field type 'string' | 'integer' | 'boolean' | 'object'
+---@field type 'string' | 'integer' | 'boolean' | 'object' | 'array'
 ---@field fields? AvanteLLMToolParamField[]
+---@field items? AvanteLLMToolParamField
+---@field choices? string[]
 ---@field optional? boolean
 
 ---@class AvanteLLMToolReturn
@@ -430,6 +441,7 @@ vim.g.avante_login = vim.g.avante_login
 ---@field timestamp string
 ---@field messages avante.HistoryMessage[] | nil
 ---@field entries avante.ChatHistoryEntry[] | nil
+---@field todos avante.TODO[] | nil
 ---@field memory avante.ChatMemory | nil
 ---@field filename string
 ---@field system_prompt string | nil

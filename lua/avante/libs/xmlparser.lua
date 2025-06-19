@@ -57,7 +57,7 @@ local function parseAttributes(attrStr)
   if not attrStr or attrStr == "" then return attrs end
 
   -- 匹配属性模式：name="value" 或 name='value'
-  for name, value in attrStr:gmatch("([-_%w]+)%s*=%s*[\"']([^\"']*)[\"']") do
+  for name, value in attrStr:gmatch("([_%w]+)%s*=%s*[\"']([^\"']*)[\"']") do
     attrs[name] = value
   end
   return attrs
@@ -90,6 +90,16 @@ local function decodeEntities(str)
   return str
 end
 
+-- 检查标签是否在行首
+local function isTagAtLineStart(xmlContent, tagStart)
+  -- 如果标签在整个内容的开始位置，认为是在行首
+  if tagStart == 1 then return true end
+
+  -- 检查标签前的字符，如果是换行符，则标签在行首
+  local charBeforeTag = xmlContent:sub(tagStart - 1, tagStart - 1)
+  return charBeforeTag == "\n"
+end
+
 -- 检查是否为有效的XML标签
 local function isValidXmlTag(tag, xmlContent, tagStart)
   -- 排除明显不是XML标签的内容，比如数学表达式 < 或 >
@@ -97,11 +107,13 @@ local function isValidXmlTag(tag, xmlContent, tagStart)
   if not tag:match("^<[^<>]*>$") then return false end
 
   -- 检查是否是合法的标签格式
-  if tag:match("^</[-_%w]+>$") then return true end -- 结束标签
-  if tag:match("^<[-_%w]+[^>]*/>$") then return true end -- 自闭合标签
-  if tag:match("^<[-_%w]+[^>]*>$") then
+  if tag:match("^</[_%w]+>$") then return true end -- 结束标签
+  if tag:match("^<[_%w]+[^>]*/>$") then return true end -- 自闭合标签
+  if tag:match("^<[_%w]+[^>]*>$") then
+    if not isTagAtLineStart(xmlContent, tagStart) then return false end
+
     -- 对于开始标签，进行额外的上下文检查
-    local tagName = tag:match("^<([-_%w]+)")
+    local tagName = tag:match("^<([_%w]+)")
 
     -- 检查是否存在对应的结束标签
     local closingTag = "</" .. tagName .. ">"
@@ -152,17 +164,17 @@ function StreamParser:parseBuffer()
     local remaining = self.buffer:sub(self.position)
 
     -- 查找下一个标签
-    local tagStart, tagEnd = remaining:find("<[^>]*>")
+    local tagStart, tagEnd = remaining:find("</?[%w_]+>")
 
     if not tagStart then
       -- 检查是否有未完成的开始标签（以<开始但没有>结束）
-      local incompleteStart = remaining:find("<[^>]*$")
+      local incompleteStart = remaining:find("<[%w_]+$")
       if incompleteStart then
         local incompleteContent = remaining:sub(incompleteStart)
         -- 确保这确实是一个未完成的标签，而不是文本中的<符号
-        if incompleteContent:match("^<[%w_-]") then
+        if incompleteContent:match("^<[%w_]") then
           -- 尝试解析未完成的开始标签
-          local tagName = incompleteContent:match("^<([%w_-]+)")
+          local tagName = incompleteContent:match("^<([%w_]+)")
           if tagName then
             -- 处理未完成标签前的文本
             if incompleteStart > 1 then
@@ -347,8 +359,8 @@ function StreamParser:parseBuffer()
     local currentDepth = #self.stack
     if currentDepth >= 1 then
       -- 检查是否是当前元素的结束标签
-      if tag:match("^</[-_%w]+>$") and self.current then
-        local tagName = tag:match("^</([-_%w]+)>$")
+      if tag:match("^</[_%w]+>$") and self.current then
+        local tagName = tag:match("^</([_%w]+)>$")
         if self.current._name == tagName then
           -- 这是当前元素的结束标签，正常处理
           if not self:processTag(tag) then
@@ -396,9 +408,9 @@ end
 
 -- 处理单个标签
 function StreamParser:processTag(tag)
-  if tag:match("^</[-_%w]+>$") then
+  if tag:match("^</[_%w]+>$") then
     -- 结束标签
-    local tagName = tag:match("^</([-_%w]+)>$")
+    local tagName = tag:match("^</([_%w]+)>$")
     if self.current and self.current._name == tagName then
       -- 标记当前元素为完成状态
       self.current._state = "complete"
@@ -412,9 +424,9 @@ function StreamParser:processTag(tag)
       self.last_error = "Mismatched closing tag: " .. tagName
       return false
     end
-  elseif tag:match("^<[-_%w]+[^>]*/>$") then
+  elseif tag:match("^<[_%w]+[^>]*/>$") then
     -- 自闭合标签
-    local tagName, attrs = tag:match("^<([-_%w]+)([^>]*)/>")
+    local tagName, attrs = tag:match("^<([_%w]+)([^>]*)/>")
     local element = {
       _name = tagName,
       _attr = parseAttributes(attrs),
@@ -429,9 +441,9 @@ function StreamParser:processTag(tag)
       if not self.current.children then self.current.children = {} end
       table.insert(self.current.children, element)
     end
-  elseif tag:match("^<[-_%w]+[^>]*>$") then
+  elseif tag:match("^<[_%w]+[^>]*>$") then
     -- 开始标签
-    local tagName, attrs = tag:match("^<([-_%w]+)([^>]*)>")
+    local tagName, attrs = tag:match("^<([_%w]+)([^>]*)>")
     local element = {
       _name = tagName,
       _attr = parseAttributes(attrs),

@@ -4,6 +4,7 @@ local Clipboard = require("avante.clipboard")
 local Providers = require("avante.providers")
 local HistoryMessage = require("avante.history_message")
 local XMLParser = require("avante.libs.xmlparser")
+local JsonParser = require("avante.libs.jsonparser")
 local Prompts = require("avante.utils.prompts")
 local LlmTools = require("avante.llm_tools")
 
@@ -225,6 +226,14 @@ function M:add_text_message(ctx, text, state, opts)
   if llm_tool_names == nil then llm_tool_names = LlmTools.get_tool_names() end
   if ctx.content == nil then ctx.content = "" end
   ctx.content = ctx.content .. text
+  local content = ctx.content
+    :gsub("<tool_code>", "")
+    :gsub("</tool_code>", "")
+    :gsub("<tool_call>", "")
+    :gsub("</tool_call>", "")
+    :gsub("<tool_use>", "")
+    :gsub("</tool_use>", "")
+  ctx.content = content
   local msg = HistoryMessage:new({
     role = "assistant",
     content = ctx.content,
@@ -234,8 +243,28 @@ function M:add_text_message(ctx, text, state, opts)
   })
   ctx.content_uuid = msg.uuid
   local msgs = { msg }
+  local xml_content = ctx.content
+  local xml_lines = vim.split(xml_content, "\n")
+  local cleaned_xml_lines = {}
+  local prev_tool_name = nil
+  for _, line in ipairs(xml_lines) do
+    if line:match("<tool_name>") then
+      local tool_name = line:match("<tool_name>(.*)</tool_name>")
+      if tool_name then prev_tool_name = tool_name end
+    elseif line:match("<parameters>") then
+      if prev_tool_name then table.insert(cleaned_xml_lines, "<" .. prev_tool_name .. ">") end
+      goto continue
+    elseif line:match("</parameters>") then
+      if prev_tool_name then table.insert(cleaned_xml_lines, "</" .. prev_tool_name .. ">") end
+      goto continue
+    end
+    table.insert(cleaned_xml_lines, line)
+    ::continue::
+  end
+  local cleaned_xml_content = table.concat(cleaned_xml_lines, "\n")
   local stream_parser = XMLParser.createStreamParser()
-  stream_parser:addData(ctx.content)
+  stream_parser:addData(cleaned_xml_content)
+  local has_tool_use = false
   local xml = stream_parser:getAllElements()
   if xml then
     local new_content_list = {}
@@ -262,8 +291,8 @@ function M:add_text_message(ctx, text, state, opts)
       end
       if not vim.tbl_contains(llm_tool_names, item._name) then goto continue end
       local ok, input = pcall(vim.json.decode, item._text)
+      if not ok then input = {} end
       if not ok and item.children and #item.children > 0 then
-        input = {}
         for _, item_ in ipairs(item.children) do
           local ok_, input_ = pcall(vim.json.decode, item_._text)
           if ok_ and input_ then
@@ -273,8 +302,9 @@ function M:add_text_message(ctx, text, state, opts)
           end
         end
       end
-      if input then
-        local tool_use_id = Utils.uuid()
+      if next(input) ~= nil then
+        local msg_uuid = ctx.content_uuid .. "-" .. idx
+        local tool_use_id = msg_uuid
         local msg_ = HistoryMessage:new({
           role = "assistant",
           content = {
@@ -287,7 +317,7 @@ function M:add_text_message(ctx, text, state, opts)
           },
         }, {
           state = state,
-          uuid = ctx.content_uuid .. "-" .. idx,
+          uuid = msg_uuid,
         })
         msgs[#msgs + 1] = msg_
         ctx.tool_use_list = ctx.tool_use_list or {}
@@ -296,12 +326,14 @@ function M:add_text_message(ctx, text, state, opts)
           name = item._name,
           input_json = input,
         }
+        has_tool_use = true
       end
       if #new_content_list > 0 then msg.message.content = table.concat(new_content_list, "\n") end
       ::continue::
     end
   end
   if opts.on_messages_add then opts.on_messages_add(msgs) end
+  if has_tool_use and state == "generating" then opts.on_stop({ reason = "tool_use", streaming_tool_use = true }) end
 end
 
 function M:add_thinking_message(ctx, text, state, opts)
@@ -325,8 +357,7 @@ function M:add_thinking_message(ctx, text, state, opts)
 end
 
 function M:add_tool_use_message(tool_use, state, opts)
-  local jsn = nil
-  if state == "generated" then jsn = vim.json.decode(tool_use.input_json) end
+  local jsn = JsonParser.parse(tool_use.input_json)
   local msg = HistoryMessage:new({
     role = "assistant",
     content = {
@@ -344,9 +375,20 @@ function M:add_tool_use_message(tool_use, state, opts)
   tool_use.uuid = msg.uuid
   tool_use.state = state
   if opts.on_messages_add then opts.on_messages_add({ msg }) end
+  if state == "generating" then opts.on_stop({ reason = "tool_use", streaming_tool_use = true }) end
 end
 
 function M:parse_response(ctx, data_stream, _, opts)
+  local orig_on_stop = opts.on_stop
+  local stopped = false
+  ---@param stop_opts AvanteLLMStopCallbackOptions
+  opts.on_stop = function(stop_opts)
+    if stop_opts and not stop_opts.streaming_tool_use then
+      if stopped then return end
+      stopped = true
+    end
+    return orig_on_stop(stop_opts)
+  end
   if data_stream:match('"%[DONE%]":') then
     self:finish_pending_messages(ctx, opts)
     if ctx.tool_use_list and #ctx.tool_use_list > 0 then
@@ -356,7 +398,10 @@ function M:parse_response(ctx, data_stream, _, opts)
     end
     return
   end
-  if data_stream == "[DONE]" then return end
+  if data_stream == "[DONE]" then
+    opts.on_stop({ reason = "complete" })
+    return
+  end
   local jsn = vim.json.decode(data_stream)
   ---@cast jsn AvanteOpenAIChatResponse
   if not jsn.choices then return end
@@ -465,12 +510,6 @@ function M:parse_curl_args(prompt_opts)
     ["Content-Type"] = "application/json",
   }
 
-  if provider_conf.extra_headers then
-    for key, value in pairs(provider_conf.extra_headers) do
-      headers[key] = value
-    end
-  end
-
   if Providers.env.require_api_key(provider_conf) then
     local api_key = self.parse_api_key()
     if api_key == nil then
@@ -504,7 +543,7 @@ function M:parse_curl_args(prompt_opts)
     url = Utils.url_join(provider_conf.endpoint, "/chat/completions"),
     proxy = provider_conf.proxy,
     insecure = provider_conf.allow_insecure,
-    headers = headers,
+    headers = Utils.tbl_override(headers, self.extra_headers),
     body = vim.tbl_deep_extend("force", {
       model = provider_conf.model,
       messages = self:parse_messages(prompt_opts),
